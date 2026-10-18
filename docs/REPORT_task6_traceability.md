@@ -64,11 +64,11 @@ python rtk_web.py 8123
 | `/help` с DeepSeek-flash | ответ 1411 символов; блок «Источники (RAG)» с 5 ссылками (`/docs/README.md`, `/docs/rtk_app/mcp_client.py`, `/docs/project_server.py`, …), цитаты `project_server.py#chunk.1`, `README.md#chunk.35` |
 | Отдача источников | `/docs/README.md`, `/docs/docs/REPORT_task6_traceability.md`, `/docs/rtk_app/rag.py` → 200, `text/plain; charset=utf-8` |
 | MCP-клиент | `mcp_call_tool('git_branch', server_id='project')` → `ok=true`, ветка/HEAD/upstream/10 изменённых файлов |
-| Область поиска (e2e) | индекс с двумя папками: `/help` при `docs_dir=<другая папка>` вернул только её фрагмент (маркер `ZZOTHERPROJECTZZ`), без содержимого 1310; после возврата `docs_dir=G:\9potok\1310` — только фрагменты 1310, маркер другой папки не найден |
+| Область поиска (e2e) | индекс с двумя папками: `/help` при другом `docs_dir` возвращает только фрагменты этой папки; после возврата — только текущего проекта |
 | `/help` при включённом MCP | команда не перехватывается «Доской»/MCP: `help=true`, git-ветка и структура проекта |
 | Локальная модель по умолчанию | при запущенном сервере `_running_local_label()` → `Local`, источник добавляется в агент (`running` без `enabled`), `/help` и чат идут через локальную модель; при остановке — детерминированная справка |
 | Нет git в целевой папке | `git_branch(repo=<папка без .git>)` → «Нет данных о GIT: папка … не является git-репозиторием»; `/help` показывает заглушку **«Нет данных о GIT»** без fallback на репозиторий ассистента |
-| Linked worktree (`.git` — файл) | `project_server._resolve_repo` принимает и папку `.git`, и файл; `/help` на `test1310\versions\1009` → `ветка: v1009`, HEAD `d4d8fc6`, репозиторий — сам worktree |
+| Linked worktree (`.git` — файл) | `project_server._resolve_repo` принимает и папку `.git`, и файл; `/help` в целевом worktree показывает его ветку/HEAD, репозиторий — сам worktree |
 | MCP-ветка (git_status/diff/files) | сервер передаёт `tool_defaults={"repo": docs_dir}` в `Agent.answer_via_mcp`; `apply_tool_defaults` подставляет `repo` только git-инструментам, явный `repo` сохраняется; `git_status({"repo": <папка без git>})` → «Нет данных о GIT» |
 
 Дополнительно исправлен рендер: подчёркивания в inline-коде больше не

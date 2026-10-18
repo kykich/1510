@@ -2,8 +2,8 @@
 """CLI работы с файлами проекта (docs/Final_task.md, задача 4).
 
 Примеры:
-    python files_cli.py find "RAG_MIN_SCORE" --root G:\\9potok\\test1310
-    python files_cli.py docs --root G:\\9potok\\test1310\\versions\\1210 `
+    python files_cli.py find "RAG_MIN_SCORE" --root C:\\work\\project
+    python files_cli.py docs --root C:\\work\\project `
         --base HEAD~1 --head HEAD --model DeepSeek-flash
     python files_cli.py docs --root ... --apply --model Local
     python files_cli.py new adr "Выбор SQLite для RAG" --root ... --apply

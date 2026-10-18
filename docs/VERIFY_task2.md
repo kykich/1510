@@ -6,7 +6,7 @@ diff и изменённые файлы, использует RAG (докуме�
 
 Ниже — проверки от самой дешёвой к полной. Все команды выполняются из корня
 проекта **`G:\9potok\1310`** (там лежат `review_pr.py` и `rtk_app/pr_review.py`).
-Проверяемый репозиторий может быть любым — например, `G:\9potok\test1310\1210`.
+Проверяемый репозиторий может быть любым — например, `C:\work\project`.
 
 ## 1. Автономные тесты (без сети, ключей и Ollama)
 
@@ -25,12 +25,12 @@ git-репозитории, лимит diff, пустой диапазон ре�
 
 ```powershell
 cd G:\9potok\1310
-python review_pr.py --repo G:\9potok\test1310\1210 `
+python review_pr.py --repo C:\work\project `
   --base HEAD~1 --head HEAD --no-rag --model DeepSeek-flash `
-  --out review1210.md
+  --out review.md
 ```
 
-Что проверить в `review1210.md`:
+Что проверить в `review.md`:
 
 - шапку: `## AI-ревью PR`, `модель: DeepSeek-flash`, число изменённых файлов,
   `RAG: не использован (отключён)`;
@@ -43,9 +43,9 @@ python review_pr.py --repo G:\9potok\test1310\1210 `
 ## 3. CLI с RAG (документация + код)
 
 ```powershell
-python review_pr.py --repo G:\9potok\test1310\1210 `
+python review_pr.py --repo C:\work\project `
   --base HEAD~1 --head HEAD --build-index --model DeepSeek-flash `
-  --max-tokens 6000 --out review1210_rag.md
+  --max-tokens 6000 --out review_rag.md
 ```
 
 `--build-index` индексирует папку репозитория (README, `docs/`, код, PDF).
@@ -62,7 +62,7 @@ python review_pr.py --repo G:\9potok\test1310\1210 `
 ```powershell
 # 1) запустить модель в блоке «Локальная модель» UI (порт 8080)
 # 2) затем:
-python review_pr.py --repo G:\9potok\test1310\1210 `
+python review_pr.py --repo C:\work\project `
   --base HEAD~1 --head HEAD --no-rag --model Local --out review_local.md
 ```
 
@@ -98,7 +98,7 @@ llama-server с ctx 8192 отвечает HTTP 400 на большой diff. В 
 ## 6. Через чат (команда `/review`)
 
 Запустите сервер (`python rtk_web.py 8123`), в поле `docs:` укажите
-репозиторий (например, `G:\9potok\test1310\1210`) и отправьте в чат:
+репозиторий (например, `C:\work\project`) и отправьте в чат:
 
 ```
 /review                    # последний коммит (HEAD~1..HEAD)

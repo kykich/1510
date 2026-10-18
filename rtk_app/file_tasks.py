@@ -84,7 +84,7 @@ def _is_skip_dir(name):
     low = str(name or "").lower()
     if not low:
         return False
-    # versions.git и другие bare-репозитории: имя заканчивается на .git.
+    # Bare-репозитории и служебные git-каталоги: имя заканчивается на .git.
     return low in _SKIP_DIRS or low.endswith(".git") or low.startswith(".")
 
 

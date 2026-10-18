@@ -12,12 +12,12 @@ diff; результат воспроизводим.
 | Читать файлы проекта | `rtk_app/file_tasks.py::read_file` — UTF-8/cp1251, лимиты, запрет секретов/бинарников; MCP `files_server.read_file`; содержимое файлов также читает существующий `project_server.list_files` | §1, §7 |
 | Искать информацию по нескольким файлам | `file_tasks.search_files` (literal/regex, номера строк, сниппеты) + `run_find` (группировка по файлам); `files_server.search_files` | §2, §4, §7, §10 |
 | Анализировать содержимое | `collect_context`, `_select_docs` (выбор документов по diff/идентификаторам), промпты `_docs_messages`/`_generate_messages`, unified diff | §3, §5, §6 |
-| Создавать и изменять файлы | JSON-план модели → `parse_plan` → `preview_plan`/`apply_plan`; `run_update_docs`, `run_generate_file`; MCP `preview_file_change`/`apply_file_change(confirm=True)` | §3, §5, §6, §7 |
+| Создавать и изменять файлы | JSON-план/маркеры `<<<FILE>>>` → `parse_plan`/`_extract_file_content` → `preview_plan`/`apply_plan`; `run_update_docs`, `run_generate_file`, `run_edit_file`; MCP `preview_file_change`/`apply_file_change(confirm=True)` | §3, §5, §6, §7 |
 | Минимум 2 сценария | Реализованы **4**: поиск использований, обновление docs по diff, генерация ADR/CHANGELOG, редактирование файла по инструкции (`/files edit`) | §4–6, §10 |
-| Работа минимум с 2–3 файлами | Поиск по 4 версиям `test1310`; docs: изменённые файлы + 1–2 документа + RAG; new: README/docs/код в контексте | §5, §6, §10 |
+| Работа минимум с 2–3 файлами | Поиск по нескольким файлам; docs: изменённые файлы + 1–2 документа + RAG; new: README/docs/код в контексте | §5, §6, §10 |
 | Изменения сохраняются или выводятся как diff | По умолчанию preview + unified diff; запись только `--apply`/`confirm=True`; `_result_text` и `_public_plan` | §3, §5, §6 |
 | Ассистент сам инициирует работу | `/files <цель>` сам выбирает сценарий, файлы, документы и безопасный путь; пользователь не указывает `открой файл X` | §8, §9 |
-| Воспроизводимость | CLI `files_cli.py`; детерминированные sandbox/поиск/diff; тесты на временных фикстурах и `test1310` | §1–10 |
+| Воспроизводимость | CLI `files_cli.py`; детерминированные sandbox/поиск/diff; тесты на временных фикстурах | §1–10 |
 | MCP | `files_server.py` (id `files` в `config.MCP_SERVERS`): `ping`, `list_files`, `read_file`, `read_many_files`, `search_files`, `file_info`, `preview_file_change`, `apply_file_change` | §7 |
 | Автовыбор MCP-сервера | Режим `auto` (`config.MCP_AUTO_ID`) + `Agent.answer_via_mcp_auto()`: модель получает инструменты `project`/`files`/`support` и выбирает сервер по запросу; старые настройки мигрируют в `auto` | `tests/check_mcp_auto.py` (51 OK) |
 | Переиспользование существующих инструментов | `pr_review.collect_changes`/`rag_context`/`_default_caller`, `RagStore`, `project_server`, `mcp_client`, `html_report`, `SessionStore` | §5, §6, §9 |
@@ -28,19 +28,19 @@ diff; результат воспроизводим.
 ### 1. Поиск использований
 
 ```powershell
-python files_cli.py find RAG_MIN_SCORE --root G:\9potok\test1310 --ext .py
+python files_cli.py find RAG_MIN_SCORE --root C:\work\project --ext .py
 ```
 
-Ассистент сам обходит проект, пропускает `versions.git`, секреты и бинарники,
-группирует совпадения по файлам. Модель не нужна.
+Ассистент сам обходит проект, пропускает bare-репозитории (`*.git`), секреты
+и бинарники, группирует совпадения по файлам. Модель не нужна.
 
 ### 2. Обновление документации по изменениям
 
 ```powershell
-python files_cli.py docs --root G:\9potok\test1310\versions\1210 `
+python files_cli.py docs --root C:\work\project `
   --base HEAD~1 --head HEAD --model DeepSeek-flash
 
-python files_cli.py docs --root G:\9potok\test1310\versions\1210 `
+python files_cli.py docs --root C:\work\project `
   --base HEAD~1 --head HEAD --model Local --apply
 ```
 
@@ -52,11 +52,11 @@ python files_cli.py docs --root G:\9potok\test1310\versions\1210 `
 
 ```powershell
 python files_cli.py new adr "Выбор SQLite для RAG" `
-  --root G:\9potok\test1310\versions\1210
+  --root C:\work\project
 python files_cli.py new adr "Выбор SQLite для RAG" `
-  --root G:\9potok\test1310\versions\1210 --apply
+  --root C:\work\project --apply
 python files_cli.py new changelog "последние изменения" `
-  --root G:\9potok\test1310\versions\1210 --apply
+  --root C:\work\project --apply
 ```
 
 Путь выбирается безопасно: `docs/ADR-YYYYMMDD-<slug>.md`, `CHANGELOG.md`,
@@ -90,30 +90,32 @@ python -c "from rtk_app import mcp_client; print(mcp_client.mcp_status(server_id
 
 | Проверка | Результат |
 |---|---|
-| `python -m tests.check_files` | **170 OK, 0 FAIL** |
+| `python -m tests.check_files` | **160 OK, 0 FAIL** |
 | Автовыбор файлов | `input_files` в ответе: `find` — файлы совпадений; `docs` — изменённый код + документы + RAG; `new` — контекст проекта; текст содержит «Автоматически выбраны файлы» |
-| Sandbox | `../`, абсолютный путь, `.env`, `apidpsk.txt`, бинарник, `versions.git` — отклонены/скрыты |
+| Sandbox | `../`, абсолютный путь, `.env`, `apidpsk.txt`, бинарник, bare-репозиторий (`*.git`) — отклонены/скрыты |
 | Имя без расширения | `read_file("README")` / `read_file("rtk_console")` находит единственный `README.md` / `rtk_console.py`; `preview_file_change`/`apply_file_change` с таким именем тоже работают как update. Неоднозначность и секреты отклоняются | §1, §7 |
 | Поиск | 3+ файла, literal/regex, номера строк, `max_results` |
 | Plan/preview/apply | diff без записи; update/create; запрет create существующего, update отсутствующего, пути вне root и секретов |
 | Docs | git diff `HEAD~1..HEAD`, фейковая модель, preview/apply, запрет файла вне target, невалидный JSON |
 | New | ADR/CHANGELOG, preview/apply, запрет path traversal |
-| MCP | 7 инструментов, `apply_file_change` требует `confirm=True` |
+| MCP | 8 инструментов, `apply_file_change` требует `confirm=True` |
 | `/files` | разбор явных и естественных целей, HTTP-интеграция, `applied=false` по умолчанию |
-| Реальный стенд `G:\9potok\test1310` | поиск `RAG_MIN_SCORE` — 6 совпадений в 4 файлах; `git diff`, docs-preview и new-preview на `versions\1210` без изменения worktree |
+| Фикстуры | поиск по 2–3 файлам, git diff, docs-preview и new-preview без изменения рабочей копии |
 
 ## Ограничения
 
-- Модель возвращает **полный текст** файла в JSON, а не patch: надёжнее для
-  применения, но крупные файлы ограничены `FILES_MAX_WRITE_CHARS`.
-- `docs` требует git-репозиторий; корень `G:\9potok\test1310` не git —
-  используйте `versions\1210` или `1210`.
+- Модель возвращает **полный текст** файла (JSON-план или маркеры
+  `<<<FILE>>>…<<<END>>>`), а не patch: надёжнее для применения, но крупные
+  файлы ограничены `FILES_MAX_WRITE_CHARS`.
+- `docs` требует git-репозиторий; укажите корень git-проекта, а не его
+  родительскую папку.
 - RAG-контекст опционален: без индекса/Ollama обновление docs и генерация
   работают по файлам, но без дополнительных фрагментов базы знаний.
 - Удаление файлов не реализовано; только create/update.
 - По умолчанию запись не выполняется — нужен `--apply`/`confirm=True`.
-- Модель может вернуть невалидный JSON или пустой файл — операция отклоняется
-  без изменения файлов.
+- Модель может вернуть пустой файл или некорректное содержимое — операция
+  отклоняется без изменения файлов; для edit/new используется протокол
+  `<<<FILE>>>…<<<END>>>` без JSON-экранирования.
 
 ## Файлы
 

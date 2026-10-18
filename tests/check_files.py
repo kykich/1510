@@ -9,8 +9,7 @@
   5. обновление документации по git diff (фейковая модель);
   6. генерацию ADR/CHANGELOG;
   7. MCP-сервер «Файлы проекта»;
-  8. команду /files и HTTP-интеграцию;
-  9. smoke-проверку на G:\\9potok\\test1310 (если папка есть).
+  8. команду `/files` и HTTP-интеграцию.
 
 Запуск: python -m tests.check_files
 """
@@ -29,7 +28,6 @@ from rtk_app.session_store import SessionStore  # noqa: E402
 import files_server  # noqa: E402
 import web.server as web_server  # noqa: E402
 
-
 def _write(path, text, binary=False):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if binary:
@@ -39,9 +37,8 @@ def _write(path, text, binary=False):
         with open(path, "w", encoding="utf-8", newline="") as fh:
             fh.write(text)
 
-
 def _make_project():
-    """Временный проект: 2–3 файла с Widget + секреты и versions.git."""
+    """Временный проект: 2–3 файла с Widget + секреты и bare-репозиторий."""
     root = tempfile.mkdtemp(prefix="files_task_")
     _write(os.path.join(root, "README.md"),
            "# Demo\n\nWidget используется в приложении.\n")
@@ -56,11 +53,10 @@ def _make_project():
            "def test_widget():\n    assert 'widget'\n")
     _write(os.path.join(root, "apidpsk.txt"), "SECRET-KEY")
     _write(os.path.join(root, ".env"), "TOKEN=SECRET")
-    _write(os.path.join(root, "versions.git", "objects", "secret.py"),
+    _write(os.path.join(root, "archive.git", "objects", "secret.py"),
            "SECRET = 'inside bare repo'")
     _write(os.path.join(root, "binary.bin"), b"\x00\x01\x02", binary=True)
     return root
-
 
 def _git(repo, *args):
     env = dict(os.environ)
@@ -74,7 +70,6 @@ def _git(repo, *args):
         raise RuntimeError(proc.stderr.decode("utf-8", "replace"))
     return proc.stdout.decode("utf-8", "replace")
 
-
 def _make_git_project():
     root = _make_project()
     _git(root, "init")
@@ -86,7 +81,6 @@ def _make_git_project():
     _git(root, "commit", "-m", "feat: widget v2")
     return root
 
-
 def test_sandbox():
     section("1. Sandbox: пути, секреты, bare-репозитории, бинарники")
     root = _make_project()
@@ -95,8 +89,8 @@ def test_sandbox():
     check("код найден", "pkg/widget.py" in files and "app.py" in files)
     check("секрет apidpsk.txt скрыт", "apidpsk.txt" not in files)
     check(".env скрыт", ".env" not in files)
-    check("bare-репозиторий versions.git скрыт",
-          not any(p.startswith("versions.git/") for p in files))
+    check("bare-репозиторий archive.git скрыт",
+          not any(p.startswith("archive.git/") for p in files))
     check("бинарник не попал в список", "binary.bin" not in files)
     check("PDF не входит в редактируемые расширения",
           ".pdf" not in file_tasks.text_extensions())
@@ -118,7 +112,6 @@ def test_sandbox():
             raised = True
         check("read_file отклоняет %s" % bad, raised)
 
-
 def test_search():
     section("2. Поиск по нескольким файлам")
     root = _make_project()
@@ -130,8 +123,8 @@ def test_search():
     check("README содержит совпадение", "README.md" in paths)
     check("секреты не найдены",
           not any("apidpsk" in p or ".env" in p for p in paths))
-    check("versions.git не найден",
-          not any(p.startswith("versions.git/") for p in paths))
+    check("bare-репозиторий не найден",
+          not any(p.startswith("archive.git/") for p in paths))
     check("у совпадения есть номер строки",
           all(isinstance(h.get("line"), int) for h in hits))
 
@@ -140,7 +133,6 @@ def test_search():
           and all("widget" in h["match"].lower() for h in regex_hits))
     limited = file_tasks.search_files(root, "Widget", max_results=2)
     check("max_results ограничивает выдачу", len(limited) == 2)
-
 
 def test_plan_and_apply():
     section("3. JSON-план, diff, preview и атомарная запись")
@@ -204,7 +196,6 @@ def test_plan_and_apply():
         raised = True
     check("невалидный JSON отклонён", raised)
 
-
 def test_run_find():
     section("4. Сценарий поиска использований")
     root = _make_project()
@@ -220,13 +211,11 @@ def test_run_find():
     check("пустой поиск сообщает об этом",
           "Ничего не найдено" in empty.get("text", ""))
 
-
 def _fake_plan(path, content, summary="изменено"):
     return {"content": json.dumps({
         "summary": summary,
         "files": [{"path": path, "action": "update", "content": content}],
     }), "prompt_tokens": 10, "completion_tokens": 5}
-
 
 def test_update_docs():
     section("5. Обновление документации по git diff")
@@ -286,7 +275,6 @@ def test_update_docs():
         root, "HEAD", "HEAD", model="Fake", caller=caller, use_rag=False)
     check("docs без изменений — ошибка", result.get("ok") is False)
 
-
 def test_generate_file():
     section("6. Генерация ADR/CHANGELOG")
     root = _make_git_project()
@@ -329,7 +317,6 @@ def test_generate_file():
         root, kind="adr", topic="x", model="Fake", caller=outside,
         use_rag=False, path="../outside.md")
     check("new запрещает путь вне root", result.get("ok") is False)
-
 
 def test_edit_file():
     section("6b. Редактирование файла по инструкции")
@@ -388,7 +375,6 @@ def test_edit_file():
     check("edit принимает raw-содержимое без JSON",
           result.get("ok") is True
           and "deepseek-green" in (result.get("diff") or ""))
-
 
 def test_mcp_server():
     section("7. MCP-сервер «Файлы проекта»")
@@ -473,7 +459,6 @@ def test_mcp_server():
     check("file_info ok", payload.get("ok") is True
           and payload.get("size", 0) > 0)
 
-
 def test_parse_files():
     section("8. Команда /files: разбор цели")
     spec = web_server.parse_files("/files find Widget")
@@ -551,7 +536,6 @@ def test_parse_files():
     check("пустая команда — help", spec["scenario"] == "help")
     check("обычный текст — не команда",
           web_server.parse_files("просто вопрос") is None)
-
 
 def test_chat_files_command():
     section("9. /files в чате: HTTP-интеграция")
@@ -655,59 +639,9 @@ def test_chat_files_command():
         web_server.file_tasks.run_update_docs = original_docs
         web_server.file_tasks.run_edit_file = original_edit
 
-
-def test_real_test1310():
-    section("10. Smoke-проверка на G:\\9potok\\test1310")
-    root = os.environ.get("FILES_TEST_ROOT", r"G:\9potok\test1310")
-    if not os.path.isdir(root):
-        check("тестовый стенд отсутствует — пропуск", True)
-        return
-    files = file_tasks.list_files(root, exts=(".py",), limit=500)
-    check("стенд содержит python-файлы", len(files) > 20)
-    check("versions.git исключён из обхода",
-          not any(p.startswith("versions.git/") for p in files))
-    result = file_tasks.run_find(root, "RAG_MIN_SCORE", exts=(".py",),
-                                 max_results=20)
-    check("поиск по всем версиям ok", result.get("ok") is True)
-    check("RAG_MIN_SCORE найден в 2+ файлах",
-          len(result.get("files") or []) >= 2)
-    check("в результатах нет versions.git",
-          not any(p.startswith("versions.git/")
-                  for p in result.get("files") or []))
-
-    worktree = os.path.join(root, "versions", "1210")
-    if os.path.exists(os.path.join(worktree, ".git")):
-        changes = pr_review.collect_changes(worktree, "HEAD~1", "HEAD")
-        check("git diff на versions\\1210", changes.get("ok") is True)
-        target = "docs/ADR-smoke-preview.md"
-
-        def caller(messages):
-            return _fake_plan(target, "# ADR smoke\n")
-
-        preview = file_tasks.run_generate_file(
-            worktree, kind="adr", topic="smoke", model="Fake",
-            caller=caller, apply=False, use_rag=False, path=target)
-        check("new preview на versions\\1210", preview.get("ok") is True)
-        check("preview не изменил worktree",
-              not os.path.isfile(os.path.join(worktree, target)))
-
-        doc_before = file_tasks.read_file(worktree, "README.md")
-
-        def doc_caller(messages):
-            return _fake_plan("README.md",
-                              doc_before + "\n<!-- preview -->\n")
-
-        docs = file_tasks.run_update_docs(
-            worktree, "HEAD~1", "HEAD", model="Fake", caller=doc_caller,
-            apply=False, use_rag=False, target_paths=["README.md"])
-        check("docs preview на versions\\1210", docs.get("ok") is True)
-        check("docs preview не изменил README",
-              file_tasks.read_file(worktree, "README.md") == doc_before)
-
-
 def test_tool_defaults():
     section("11. Подстановка root для MCP «Файлы»")
-    target = r"G:\9potok\test1310"
+    target = r"C:\work\project"
     check("files: read_file получает root",
           apply_tool_defaults("read_file", {}, {"root": target},
                               server_id="files") == {"root": target})
@@ -726,7 +660,6 @@ def test_tool_defaults():
                               {"root": target}, server_id="files")["root"]
           == r"G:\other")
 
-
 def main():
     ensure_utf8()
     test_sandbox()
@@ -739,16 +672,9 @@ def main():
     test_mcp_server()
     test_parse_files()
     test_chat_files_command()
-    test_real_test1310()
     test_tool_defaults()
     sys.exit(finish())
 
-
 if __name__ == "__main__":
     main()
-
-
-
-
-
 

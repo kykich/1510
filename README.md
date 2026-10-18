@@ -317,8 +317,6 @@ python review_pr.py --base HEAD~1 --head HEAD \
 
 Пошаговая инструкция проверки (тесты, CLI на сторонних репозиториях, RAG,
 локальная модель, GitHub Action) — `docs/VERIFY_task2.md`.
-Проверка на четырёх версиях проекта (ветки `v1009`/`v1210`/`v2309`/`v3108`) —
-`docs/VERIFY_versions.md`.
 
 ## Поддержка пользователей (`docs/Final_task.md`, задача 3)
 
@@ -406,7 +404,7 @@ python support_index.py
   «Автоматически выбраны файлы» (для `docs` — изменённый код + документы +
   RAG; для `new` — контекст проекта).
 - Корень — `docs:` из блока RAG; для `docs` нужен git-worktree (например,
-  `G:\9potok\test1310\versions\1210`).
+  `C:\work\project`).
 - Sandbox: запрещены `..`, symlink-выход, `.git`/`*.git`, `session`,
   `support_data`, секреты, бинарники; лимиты размера; удаление файлов не
   выполняется.
@@ -417,14 +415,14 @@ python support_index.py
 **CLI (воспроизводимо):**
 
 ```powershell
-python files_cli.py find RAG_MIN_SCORE --root G:\9potok\test1310 --ext .py
-python files_cli.py docs --root G:\9potok\test1310\versions\1210 `
+python files_cli.py find RAG_MIN_SCORE --root C:\work\project --ext .py
+python files_cli.py docs --root C:\work\project `
   --base HEAD~1 --head HEAD --model DeepSeek-flash --no-rag
 python files_cli.py new adr "Выбор SQLite для RAG" `
-  --root G:\9potok\test1310\versions\1210 --apply
+  --root C:\work\project --apply
 ```
 
-Тест: `python -m tests.check_files` — **170 OK, 0 FAIL**. Проверка —
+Тест: `python -m tests.check_files` — **160 OK, 0 FAIL**. Проверка —
 `docs/VERIFY_task4.md`, трассировка — `docs/REPORT_task9_traceability.md`.
 
 ## Структура проекта
@@ -481,7 +479,6 @@ python files_cli.py new adr "Выбор SQLite для RAG" `
 │   ├── VERIFY_task2.md  # пошаговая проверка AI-ревью PR (тесты, CLI, RAG, Action)
 │   ├── VERIFY_task3.md  # пошаговая проверка поддержки (тикеты, MCP, FAQ/RAG)
 │   ├── VERIFY_task4.md  # пошаговая проверка работы с файлами (files/MCP)
-│   ├── VERIFY_versions.md # проверка RAG, /help и /review на 4 версиях
 │   ├── session-handoff.md # передача состояния: сделано/проверено/следующие шаги
 │   └── REPORT_task_traceability.md  # трассировка требований ТЗ → код → тест
 ├── requirements.txt     # единственная зависимость — mcp (опционально)
