@@ -168,7 +168,7 @@
                         <label class="compact-label side-label">
                             <span>сервер MCP</span>
                             <select id="mcp-server" class="gen-input mcp-input"
-                                    title="Какой MCP-сервер использовать (демо или календарь)"></select>
+                                    title="Авто — модель выбирает MCP-сервер по запросу; можно закрепить конкретный сервер"></select>
                         </label>
                         <label class="compact-label side-label">
                             <span>модель MCP</span>
@@ -180,15 +180,8 @@
                             <span id="mcp-status" class="mcp-status"></span>
                         </div>
                         <div id="mcp-tools" class="mcp-tools" hidden></div>
-                        <!-- КОМПОЗИЦИЯ (task5): запуск пайплайна нескольких MCP-серверов
-                             календарь -> замполит -> завхоз (доска — вывод таблицей). -->
-                        <div class="mcp-status-row">
-                            <button id="mcp-compose" type="button" class="btn-side primary"
-                                    title="Запустить композицию: календарь → замполит → завхоз">Запустить композицию</button>
-                        </div>
-                        <div id="mcp-compose-status" class="mcp-compose-status" hidden></div>
                     </div>
-                    <span class="side-note">MCP: подключение, инструменты, модель ответа, композиция</span>
+                    <span class="side-note">MCP: авто-выбор сервера по запросу, инструменты и модель ответа</span>
                 </div>
             </section>
 
@@ -438,7 +431,7 @@
 
                 <!-- Ход запросов (цепочка агента) — в верхней строке справа -->
                 <div class="trace-head">
-                    <div class="panel-title">Ход запросов · агент</div>
+                    <div class="panel-title">Ход запросов</div>
                     <div id="trace" class="panel-trace">
                         <div class="trace-empty">ход: агент → работа → LLM → ответ</div>
                     </div>

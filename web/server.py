@@ -34,7 +34,8 @@ JSON-API:
                                без собственного max_tokens.
                                Команды в question: /help (RAG по проекту),
                                /review (AI-ревью PR), /support (поддержка
-                               по тикету/пользователю + FAQ).
+                               по тикету/пользователю + FAQ), /files
+                               (поиск/обновление/создание файлов проекта).
     POST /api/newchat       - начать новый разговор (очистить историю)
     POST /api/compact       - {enabled, keep} -> настройки сжатия (summary)
     POST /api/compact_summary - {keep} -> дописать вытесненное в summary
@@ -130,6 +131,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from rtk_app import config
 from rtk_app.agent import Agent
+from rtk_app import file_tasks
 from rtk_app import local_server
 from rtk_app import support as support_mod
 from rtk_app.session_store import SessionStore
@@ -210,6 +212,199 @@ def parse_support(question):
             query_parts.append(token)
     return {"ticket_id": ticket_id, "user_id": user_id,
             "query": " ".join(query_parts).strip(), "use_rag": use_rag}
+
+
+# ----------------------------------------------------------------------
+# Команда /files (docs/Final_task.md, задача 4): работа с файлами проекта
+# ----------------------------------------------------------------------
+_FILES_RE = re.compile(r"^\s*/files\b(.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def _looks_like_path_token(token):
+    """Похож ли токен на имя файла/путь (для /files edit)."""
+    value = str(token or "").strip().strip("\"'")
+    if not value:
+        return False
+    if re.match(r"^[A-Za-z]:[\\/]", value):
+        return True
+    if "/" in value or "\\" in value:
+        return True
+    if re.search(r"\.[A-Za-z0-9]{1,8}$", value):
+        return True
+    return "_" in value
+
+
+def _is_chat_edit_request(question):
+    """Похож ли обычный запрос чата на задачу изменения файла."""
+    low = str(question or "").lower()
+    actions = ("добавь", "добавить", "измени", "изменить", "замени",
+               "заменить", "исправь", "поправь", "поставь", "сделай",
+               "убери", "примени")
+    targets = ("файл", "css", "html", "фон", "цвет", "стил", "шрифт",
+               "отступ", "рамк", "кнопк", "поле ввода", "input", "textarea",
+               "readme", "документац", "код", "model", "модель", "config")
+    return (any(x in low for x in actions)
+            and any(x in low for x in targets))
+
+
+def _chat_edit_apply(question):
+    """Писать изменение сразу или только показать diff."""
+    low = str(question or "").lower()
+    return not any(x in low for x in ("покажи", "не записывай", "не меняй",
+                                      "preview", "diff", "сначала"))
+
+
+def _is_chat_create_request(question):
+    """Просят создать новый файл, а не изменить существующий."""
+    low = str(question or "").lower()
+    actions = ("создай", "создать", "новый файл", "new file", "сделай файл")
+    return any(x in low for x in actions) and ("файл" in low or ".md" in low
+                                               or ".txt" in low)
+
+
+def _chat_create_path(question):
+    """Имя файла из фразы «создай info.md в корне»."""
+    for token in str(question or "").split():
+        value = token.strip(" .,:;()[]{}\"'")
+        if _looks_like_path_token(value):
+            return value
+    return ""
+
+
+def parse_files(question):
+    """Разбирает /files <цель> и возвращает dict или None.
+
+    Явные формы:
+      /files find <запрос>
+      /files docs [base] [head] [--apply] [--no-rag]
+      /files new <adr|changelog|readme|doc> <тема> [--apply]
+      /files edit [путь] <инструкция> [--apply]
+
+    Естественная цель тоже поддерживается: «найди использования…»,
+    «обнови документацию…», «создай ADR…». Пользователь задаёт цель, а файлы
+    выбирает сам ассистент.
+    """
+    match = _FILES_RE.match(str(question or ""))
+    if not match:
+        return None
+    raw = (match.group(1) or "").strip()
+    tokens = raw.split()
+    first = tokens[0].lower() if tokens else ""
+    explicit_docs = first in ("docs", "doc", "documentation")
+    scenario = ""
+    apply_change = False
+    use_rag = True
+    base = head = kind = topic = path = instruction = ""
+    rest = []
+    for token in tokens:
+        low = token.lower()
+        if low in ("--apply", "apply"):
+            apply_change = True
+        elif low in ("--no-rag", "no-rag"):
+            use_rag = False
+        elif low.startswith("base="):
+            base = token.split("=", 1)[1].strip()
+        elif low.startswith("head="):
+            head = token.split("=", 1)[1].strip()
+        elif low.startswith("kind="):
+            kind = token.split("=", 1)[1].strip()
+        elif low.startswith("topic="):
+            topic = token.split("=", 1)[1].strip()
+        elif low.startswith("path="):
+            path = token.split("=", 1)[1].strip()
+        elif not scenario and low in ("find", "search", "usages", "найди",
+                                      "поиск"):
+            scenario = "find"
+        elif not scenario and low in ("docs", "doc", "documentation",
+                                      "обнови", "документация"):
+            scenario = "docs"
+        elif not scenario and low in ("new", "create", "generate", "создай",
+                                      "сгенерируй", "новый"):
+            scenario = "new"
+        elif not scenario and low in ("edit", "отредактируй", "правка",
+                                      "правь"):
+            scenario = "edit"
+        else:
+            rest.append(token)
+    if not scenario:
+        low = raw.lower()
+        if not low:
+            scenario = "help"
+        elif any(x in low for x in ("найд", "где использ", "вызыв", "упомин",
+                                     "search", "find")):
+            scenario = "find"
+        elif (any(x in low for x in ("измени", "изменить", "отредактируй",
+                                     "правь", "edit"))
+              and any(_looks_like_path_token(t) for t in tokens)):
+            scenario = "edit"
+        elif any(x in low for x in ("обнови", "документац", "docs", "readme")):
+            scenario = "docs"
+        elif any(x in low for x in ("создай", "сгенерируй", "новый файл",
+                                     "adr", "changelog")):
+            scenario = "new"
+        elif any(x in low for x in ("измени", "изменить", "отредактируй",
+                                     "правь", "edit")):
+            scenario = "edit"
+        else:
+            scenario = "find"
+    if scenario == "edit":
+        words = list(rest)
+        if not path:
+            path_index = None
+            for i, token in enumerate(words):
+                if (token.lower() in ("файле", "файл", "файла", "для")
+                        and i + 1 < len(words)):
+                    path_index = i + 1
+                    break
+            if path_index is None:
+                for i, token in enumerate(words):
+                    if _looks_like_path_token(token):
+                        path_index = i
+                        break
+            if path_index is not None:
+                path = words[path_index].strip("\"'")
+                words = words[:path_index] + words[path_index + 1:]
+        while words and words[0].lower() in ("в", "файле", "файл",
+                                             "файла", "для"):
+            words.pop(0)
+        instruction = " ".join(words).strip()
+        return {"scenario": "edit", "query": "", "base": "", "head": "",
+                "kind": "", "topic": "", "path": path,
+                "instruction": instruction, "apply": apply_change,
+                "use_rag": use_rag}
+    if scenario == "find":
+        query = " ".join(rest).strip() or raw
+        return {"scenario": "find", "query": query, "base": "", "head": "",
+                "kind": "", "topic": "", "path": "", "apply": apply_change,
+                "use_rag": use_rag}
+    if scenario == "docs":
+        revs = []
+        if explicit_docs:
+            revs = [token for token in rest
+                    if re.match(r"^[A-Za-z0-9][A-Za-z0-9._~^/-]*$", token)]
+        if not base:
+            base = revs[0] if revs else "HEAD~1"
+        if not head:
+            head = revs[1] if len(revs) > 1 else "HEAD"
+        return {"scenario": "docs", "query": "", "base": base, "head": head,
+                "kind": "", "topic": "", "path": "", "apply": apply_change,
+                "use_rag": use_rag}
+    if scenario == "new":
+        known = ("adr", "changelog", "readme", "doc", "file")
+        if not path and rest and _looks_like_path_token(rest[0]):
+            path = rest.pop(0).strip("\"'")
+        if not kind and rest and rest[0].lower() in known:
+            kind = rest.pop(0).lower()
+        elif not kind:
+            kind = "adr"
+        if not topic:
+            topic = " ".join(rest).strip() or "последние изменения проекта"
+        return {"scenario": "new", "query": "", "base": "", "head": "",
+                "kind": kind, "topic": topic, "path": path,
+                "apply": apply_change, "use_rag": use_rag}
+    return {"scenario": "help", "query": "", "base": "", "head": "",
+            "kind": "", "topic": "", "path": "", "apply": False,
+            "use_rag": use_rag}
 
 
 def support_lookup(ticket_id="", user_id="", query="", use_mcp=True,
@@ -395,20 +590,15 @@ class _ServerState:
     #   status  — последний результат проверки статуса MCP-сервера.
     mcp_enabled = getattr(config, "MCP_ENABLED", False)
     mcp_model = getattr(config, "MCP_MODEL", "")
-    # id выбранного MCP-сервера (см. config.MCP_SERVERS).
-    mcp_server = getattr(config, "MCP_SERVER_DEFAULT", "calendar")
+    # id выбранного MCP-сервера (см. config.MCP_SERVERS) либо "auto" —
+    # модель сама выбирает сервер и инструмент по запросу.
+    mcp_server = getattr(config, "MCP_SERVER_DEFAULT", "auto")
     mcp_status = None
     mcp_lock = threading.Lock()
-    # КОМПОЗИЦИЯ MCP: запущена ли она сейчас.
-    # ВАЖНО: композиция и режим «Использовать MCP» — ВЗАИМОИСКЛЮЧАЮЩИЕ.
-    #   * запуск композиции — выключает чекбокс «Использовать MCP»
-    #     (композиция работает сама по себе);
-    #   * включение чекбокса «Использовать MCP» — останавливает композицию
-    #     и переводит сервер в режим отдельных серверов по выбору.
+    # Композиция MCP удалена. Поля оставлены только для совместимости со
+    # старыми настройками/клиентами и всегда равны False/None.
     composition_running = False
-    # Поток фонового ТИКА композиции (запускается только в режиме композиции).
     composition_thread = None
-    # Событие остановки тика композиции (устанавливается при выключении).
     composition_stop = None
 
     # --- ЛОКАЛЬНАЯ МОДЕЛЬ (llama.cpp / Ollama) ---
@@ -426,6 +616,24 @@ def _mcp_settings_file():
     return getattr(config, "MCP_SETTINGS_FILE", None)
 
 
+def _mcp_auto_id():
+    """id режима автовыбора MCP-сервера моделью."""
+    return str(getattr(config, "MCP_AUTO_ID", "auto"))
+
+
+def _mcp_valid_server_ids():
+    """Допустимые id: все реальные серверы + режим авто."""
+    ids = {str(s.get("id")) for s in
+           (getattr(config, "MCP_SERVERS", []) or [])}
+    ids.add(_mcp_auto_id())
+    return ids
+
+
+def _mcp_is_auto(server_id=None):
+    """True, если выбран режим автовыбора сервера."""
+    return str(server_id or _ServerState.mcp_server or "") == _mcp_auto_id()
+
+
 def _load_mcp_settings():
     """Загружает настройки MCP из файла (если есть), заполняя состояние."""
     path = _mcp_settings_file()
@@ -441,12 +649,19 @@ def _load_mcp_settings():
             if isinstance(model, str):
                 _ServerState.mcp_model = model
             server = data.get("server")
-            if isinstance(server, str) and server:
+            # Новый формат хранит routing="server", если пользователь явно
+            # закрепил сервер. Старые настройки (без routing) переводим в
+            # авто-режим: модель сама выберет сервер по запросу.
+            routing = str(data.get("routing") or "").strip().lower()
+            if (routing == "server" and isinstance(server, str)
+                    and server in _mcp_valid_server_ids()):
                 _ServerState.mcp_server = server
-            # Режим композиции (взаимоисключающий с MCP).
-            comp = data.get("composition")
-            if comp is not None:
-                _ServerState.composition_running = bool(comp)
+            else:
+                # В настройках мог остаться удалённый сервер (calendar/doska/…).
+                _ServerState.mcp_server = getattr(
+                    config, "MCP_SERVER_DEFAULT", _mcp_auto_id())
+            # Композиция MCP удалена; старые настройки игнорируем.
+            _ServerState.composition_running = False
     except Exception as exc:
         print("[MCP] не удалось загрузить настройки: %s" % exc, flush=True)
 
@@ -462,7 +677,10 @@ def _save_mcp_settings():
             json.dump({"enabled": _ServerState.mcp_enabled,
                        "model": _ServerState.mcp_model,
                        "server": _ServerState.mcp_server,
-                       "composition": _ServerState.composition_running}, f,
+                       "routing": ("server"
+                                   if _ServerState.mcp_server
+                                   and not _mcp_is_auto()
+                                   else "auto")}, f,
                       ensure_ascii=False, indent=2)
     except Exception as exc:
         print("[MCP] не удалось сохранить настройки: %s" % exc, flush=True)
@@ -570,9 +788,18 @@ def _mcp_state_payload(check=False):
     servers = []
     if mcp_client is not None:
         try:
-            servers = mcp_client.mcp_servers()
+            servers = list(mcp_client.mcp_servers())
         except Exception:
             servers = []
+    # Режим «Авто» — не отдельный процесс, а вариант выбора в UI.
+    auto_id = _mcp_auto_id()
+    if not any(str(s.get("id")) == auto_id for s in servers):
+        servers.insert(0, {
+            "id": auto_id,
+            "label": getattr(config, "MCP_AUTO_LABEL",
+                             "Авто (модель выбирает сервер)"),
+            "args": [],
+        })
     return {
         "ok": True,
         "enabled": bool(_ServerState.mcp_enabled),
@@ -581,9 +808,7 @@ def _mcp_state_payload(check=False):
         "servers": servers,
         "available": mcp_client is not None,
         "status": status,
-        # Режим композиции (взаимоисключающий с «Использовать MCP»).
-        # ВАЖНО: ключ называется composition_running, чтобы НЕ конфликтовать
-        # с ключом "composition" (ОТЧЁТ прогона) в ответе на action="compose".
+        # Устаревший ключ: композиция удалена, всегда False.
         "composition_running": bool(_ServerState.composition_running),
     }
 
@@ -595,309 +820,31 @@ def _probe_mcp_status():
                 "tools": [], "server": "",
                 "error": "MCP-клиент недоступен (не установлен пакет mcp)."}
     try:
+        if _mcp_is_auto():
+            tools = []
+            errors = []
+            connected = []
+            for srv in mcp_client.mcp_servers():
+                sid = str(srv.get("id"))
+                st = mcp_client.mcp_status(server_id=sid)
+                if st.get("ok"):
+                    connected.append(sid)
+                    tools.extend("%s.%s" % (sid, name)
+                                 for name in (st.get("tools") or []))
+                else:
+                    errors.append("%s: %s" % (sid, st.get("error") or "ошибка"))
+            if not connected:
+                return {"ok": False, "connected": False, "tools_count": 0,
+                        "tools": [], "server": _mcp_auto_id(),
+                        "error": "; ".join(errors) or "нет доступных серверов"}
+            return {"ok": True, "connected": True,
+                    "tools_count": len(tools), "tools": tools,
+                    "server": "авто: " + ", ".join(connected),
+                    "error": None}
         return mcp_client.mcp_status(server_id=(_ServerState.mcp_server or None))
     except Exception as exc:
         return {"ok": False, "connected": False, "tools_count": 0,
                 "tools": [], "server": "", "error": str(exc)}
-
-
-def _collect_due_reminders():
-    """Собирает НАСТУПИВШИЕ напоминания календаря (для доставки в чат).
-
-    Напоминания выдаёт MCP-инструмент ``run_due`` календарного сервера —
-    он же делает «ленивый прогон» и возвращает готовые тексты. Вызываем его
-    АВТОМАТИЧЕСКИ при каждом запросе пользователя, чтобы напоминание
-    приходило САМО, а не только когда модель «догадается» вызвать инструмент.
-
-    Возвращает список строк-напоминаний (может быть пустым). Ошибки MCP
-    игнорируются (возвращается []): доставка напоминаний не должна ломать
-    основной ответ. Работает только для календарного сервера.
-    """
-    if mcp_client is None:
-        return []
-    # Только у календарного MCP-сервера есть инструмент run_due.
-    server_id = _ServerState.mcp_server or None
-    try:
-        res = mcp_client.mcp_call_tool("run_due", {}, server_id=server_id)
-    except Exception as exc:
-        print("[REMINDER] не удалось собрать напоминания: %s" % exc,
-              flush=True)
-        return []
-    if not res.get("ok"):
-        # Инструмента run_due нет (другой сервер) или ошибка — молча пропускаем.
-        return []
-    text = (res.get("text") or "").strip()
-    if not text or "нет" in text.lower() and "напоминан" in text.lower():
-        # «Наступивших напоминаний нет.» — пустой результат.
-        return []
-    # Ответ инструмента run_due: первая строка — «Напоминаний: N», далее тексты
-    # напоминаний. Отделяем служебную шапку, если она есть.
-    lines = [ln for ln in text.splitlines() if ln.strip()]
-    if lines and lines[0].lower().startswith("напоминаний:"):
-        lines = lines[1:]
-    return lines
-
-
-def _mcp_text(server_id, tool, arguments=None, timeout=None):
-    """Вызывает MCP-инструмент и возвращает текст результата.
-
-    Возвращает (ok, text): ok=False, если клиент недоступен или инструмент
-    сообщил об ошибке. Обёртка над mcp_client.mcp_call_tool с явным сроком.
-    """
-    if mcp_client is None:
-        return False, "MCP-клиент недоступен (не установлен пакет mcp)."
-    try:
-        res = mcp_client.mcp_call_tool(tool, arguments or {},
-                                       timeout=timeout, server_id=server_id)
-    except Exception as exc:
-        return False, "Ошибка вызова %s: %s" % (tool, exc)
-    if not res.get("ok"):
-        return False, res.get("error") or res.get("text") or "ошибка инструмента"
-    return True, (res.get("text") or "")
-
-
-def _composition_run(verbose=False):
-    """ЗАПУСКАЕТ КОМПОЗИЦИЮ MCP-серверов (см. docs/task5.md).
-
-    Пайплайн:
-      1) «календарь» — события за COMPOSITION_DAYS_AHEAD дней (вперёд от сегодня);
-      2) «замполит»  — по каждому событию определяется ФОРМАТ вывода времени
-                       по времени начала (минуты/часы/без изменения) и время
-                       начала приводится к нему (build_pairs);
-      3) «завхоз»    — сохранение пар «событие + время» в JSON-файл (save_pairs).
-
-    «Доска» в композиции не участвует (это сервер ВЫВОДА по запросу в чате),
-    но результат «завхоза» ей потом доступен для таблицы.
-
-    Возвращает dict с отчётом: {ok, calendar, pairs, saved, error, steps}.
-    События календаря передаются «замполиту» строкой JSON (серверы остаются
-    раздельными stdio-процессами; композицию собирает оркестратор).
-    """
-    timeout = getattr(config, "COMPOSITION_CALL_TIMEOUT", 30)
-    days = int(getattr(config, "COMPOSITION_DAYS_AHEAD", 7) or 7)
-    cal_srv = getattr(config, "COMPOSITION_CALENDAR_SERVER", "calendar")
-    zam_srv = getattr(config, "COMPOSITION_ZAMPOLIT_SERVER", "zampolit")
-    zav_srv = getattr(config, "COMPOSITION_ZAVHOZ_SERVER", "zavhoz")
-    steps = []
-    # Состав композиции для СООБЩЕНИЯ в чат (названия серверов + описания).
-    servers = list(getattr(config, "COMPOSITION_SERVERS", []) or [])
-
-    # --- Шаг 1: события календаря на ближайшие N дней ---
-    today = time.strftime("%Y-%m-%d")
-    until = time.strftime("%Y-%m-%d", time.localtime(time.time() + days * 86400))
-    ok, cal_text = _mcp_text(cal_srv, "list_events",
-                             {"start": today, "end": until}, timeout=timeout)
-    steps.append({"step": "calendar", "ok": ok, "detail": cal_text[:400]})
-    if not ok:
-        return {"ok": False, "error": "Календарь: %s" % cal_text,
-                "steps": steps, "pairs": [], "count": 0, "servers": servers}
-    events = _parse_calendar_events(cal_text)
-    steps.append({"step": "calendar_parsed", "ok": True,
-                  "detail": "событий: %d" % len(events)})
-    if not events:
-        # Нет событий — композиция формально успешна, но сохранять нечего.
-        ok, sav_text = _mcp_text(zav_srv, "save_pairs",
-                                 {"pairs_json": json.dumps({"pairs": []}),
-                                  "source": "composition"}, timeout=timeout)
-        steps.append({"step": "zavhoz", "ok": ok, "detail": sav_text[:400]})
-        return {"ok": True, "calendar": cal_text, "pairs": [], "count": 0,
-                "saved": sav_text, "steps": steps, "servers": servers,
-                "detail": "Событий на ближайшие %d дней нет." % days}
-
-    # --- Шаг 2: замполит — пары «событие + время» ---
-    ok, zam_text = _mcp_text(zam_srv, "build_pairs",
-                             {"events_json": json.dumps(events, ensure_ascii=False)},
-                             timeout=timeout)
-    steps.append({"step": "zampolit", "ok": ok, "detail": zam_text[:600]})
-    if not ok:
-        return {"ok": False, "error": "Замполит: %s" % zam_text,
-                "steps": steps, "pairs": [], "count": 0, "servers": servers}
-    try:
-        built = json.loads(zam_text)
-    except Exception as exc:
-        return {"ok": False, "error": "Замполит вернул не JSON: %s" % exc,
-                "steps": steps, "pairs": [], "count": 0, "servers": servers}
-    pairs = built.get("pairs") if isinstance(built, dict) else None
-    if not isinstance(pairs, list):
-        pairs = []
-
-    # --- Шаг 3: завхоз — сохранить снимок в JSON ---
-    ok, sav_text = _mcp_text(zav_srv, "save_pairs",
-                             {"pairs_json": json.dumps({"pairs": pairs},
-                                                       ensure_ascii=False),
-                              "source": "composition"}, timeout=timeout)
-    steps.append({"step": "zavhoz", "ok": ok, "detail": sav_text[:400]})
-    if not ok:
-        return {"ok": False, "error": "Завхоз: %s" % sav_text,
-                "steps": steps, "pairs": pairs, "count": len(pairs),
-                "servers": servers}
-    if verbose:
-        print("[COMPOSE] пар: %d; %s" % (len(pairs), sav_text), flush=True)
-    return {"ok": True, "calendar": cal_text, "pairs": pairs,
-            "count": len(pairs), "saved": sav_text, "steps": steps,
-            "servers": servers,
-            "detail": "Событий: %d, пар сохранено: %d." % (len(events), len(pairs))}
-
-
-def _format_composition_message(report):
-    """Формирует ОТДЕЛЬНОЕ сообщение в чат после запуска композиции.
-
-    Содержит: заголовок «Композиция MCP запущена», список задействованных
-    MCP-серверов с кратким описанием работы каждого, и краткий итог прогона.
-    Возвращает готовый к показу текст (или "" если серверов нет).
-    """
-    report = report or {}
-    servers = report.get("servers") or list(
-        getattr(config, "COMPOSITION_SERVERS", []) or [])
-    lines = ["**Композиция MCP запущена.** Задействованы серверы:"]
-    for s in servers:
-        label = s.get("label") or s.get("id") or "?"
-        desc = s.get("desc") or ""
-        lines.append("- **%s** — %s" % (label, desc))
-    # Итог прогона (сколько событий/пар) — если есть.
-    if report.get("ok"):
-        detail = report.get("detail") or ""
-        if detail:
-            lines.append("")
-            lines.append("Итог: %s" % detail)
-    else:
-        lines.append("")
-        lines.append("Внимание, ошибка прогона: %s"
-                     % (report.get("error") or "неизвестно"))
-    return "\n".join(lines)
-
-
-def _composition_report_text(report):
-    """Готовит ТЕКСТОВУЮ сводку прогона композиции ДЛЯ МОДЕЛИ.
-
-    Модель, выбранная в селекте «Модель MCP», получает эту сводку и
-    формирует короткое сообщение в чат (_handle_mcp, action «compose»).
-    Возвращает строку: состав серверов, итог и (если есть) сохранённые пары.
-    """
-    report = report or {}
-    lines = []
-    servers = report.get("servers") or list(
-        getattr(config, "COMPOSITION_SERVERS", []) or [])
-    if servers:
-        lines.append("Задействованные MCP-серверы:")
-        for s in servers:
-            label = s.get("label") or s.get("id") or "?"
-            desc = s.get("desc") or ""
-            lines.append("  - %s — %s" % (label, desc))
-    if report.get("ok"):
-        lines.append("Результат: %s" % (report.get("detail") or "успешно"))
-        if report.get("saved"):
-            lines.append("Сохранено: %s" % report.get("saved"))
-        pairs = report.get("pairs") or []
-        if pairs:
-            lines.append("Пары «событие + время» (до %d):" % len(pairs))
-            for p in pairs[:10]:
-                ev = p.get("event") or p.get("summary") or "?"
-                tm = p.get("time") or ""
-                mode = p.get("mode") or ""
-                lines.append("  - %s → %s (%s)" % (ev, tm, mode))
-    else:
-        lines.append("Результат: ОШИБКА — %s" % (report.get("error") or "?"))
-    return "\n".join(lines)
-
-
-def _parse_calendar_events(text):
-    """Разбирает текстовый вывод list_events в список {summary, start}.
-
-    Календарь печатает блоки вида:
-        События за <период>:
-          UID: <uid>
-          <YYYY-MM-DD HH:MM> — <summary>, до …, место: …   (с временем)
-          <YYYY-MM-DD>       — <summary>, до …, место: …   (на весь день)
-
-    Событие «НА ВЕСЬ ДЕНЬ» календарь отдаёт БЕЗ времени — только датой
-    (``_localize_str`` для date-значения печатает ``"%Y-%m-%d"``). Такие
-    строки распознаём отдельно и помечаем ``all_day: True`` (поле ``start`` —
-    дата, поля ``time`` нет). Для событий со временем ``all_day: False``.
-
-    Берём строку времени и название до запятой/«, до». Терпимо к формату:
-    если разобрать не удалось — событие пропускается.
-    """
-    import re
-    events = []
-    # Строка события со ВРЕМЕНЕМ: "  2026-09-26 10:00 — Перекур, до ...".
-    pat_timed = re.compile(
-        r"(?P<start>\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2})\s*—\s*(?P<summary>.+)")
-    # Строка события БЕЗ времени (на весь день): "  2026-09-30 — Отпуск, ...".
-    pat_allday = re.compile(
-        r"(?P<start>\d{4}-\d{2}-\d{2})\s*—\s*(?P<summary>.+)")
-    # Отсекаем служебные строки (заголовок «События за …», «UID: …»), иначе
-    # заголовок-диапазон «… 2026-09-26 — 2026-10-03:» ложно ловится как
-    # событие «на весь день».
-    for line in str(text or "").splitlines():
-        stripped = line.strip()
-        if not stripped or stripped.startswith("UID:"):
-            continue
-        if re.match(r"^\s*События за\b", line) or re.match(
-                r"^\s*\d{4}-\d{2}-\d{2}\s+—\s+\d{4}-\d{2}-\d{2}\s*:", line):
-            continue
-        m = pat_timed.search(line)
-        all_day = False
-        if m:
-            start = m.group("start").replace("T", " ")
-        else:
-            m = pat_allday.search(line)
-            if not m:
-                continue
-            start = m.group("start").strip()
-            all_day = True
-        summary = m.group("summary").strip()
-        # Обрезаем хвост «, до …» / «, место …» — оставляем только название.
-        for sep in (", до ", ", место:", ", место "):
-            idx = summary.find(sep)
-            if idx != -1:
-                summary = summary[:idx].strip()
-        # Название в кавычках-ёлочках убираем, если есть.
-        summary = summary.strip().strip("«»\"'")
-        events.append({"summary": summary, "start": start, "all_day": all_day})
-    return events
-
-
-def _board_direct_result(server_id, model=None):
-    """Надёжно формирует ответ для сервера «Доска» БЕЗ выбора инструмента LLM.
-
-    Проблема: при запросе к «Доске» через обычный MCP-путь инструмент выбирает
-    МОДЕЛЬ — она может выбрать не тот инструмент (ping) или ошибиться, и вывод
-    доски «падает». Здесь инструменты доски вызываются ДЕТЕРМИНИРОВАННО:
-
-      1) ``show_board_html`` — HTML-таблица (основной вывод в чате);
-      2) ``show_board``      — текстовая таблица (текстовый ответ/фолбэк).
-
-    Возвращает готовый ``result``-dict той же формы, что и ``answer_via_mcp``:
-    {ok, text, html, answers, meta, ...}. Никакой LLM для выбора инструмента
-    не привлекается — это гарантирует, что доска всегда выводится таблицей.
-    """
-    ok_html, html_text = _mcp_text(server_id, "show_board_html", {})
-    ok_txt, board_text = _mcp_text(server_id, "show_board", {})
-    # Если ни один инструмент не ответил — вернём понятную ошибку.
-    if not ok_html and not ok_txt:
-        err = board_text or html_text or "инструмент доски недоступен"
-        return {"ok": False, "error": "Доска: %s" % err, "text": "",
-                "html": "", "answers": [], "meta": ""}
-    # Текст для ответа — таблица show_board; если она не удалась, берём HTML.
-    text = board_text if ok_txt else html_text
-    html = ""
-    if ok_html and "<table" in str(html_text):
-        html = ('<div class="mcp-answer"><div class="mcp-answer-head">'
-                'MCP-инструмент: <b>show_board_html</b>({})</div>'
-                '<div class="mcp-answer-body">%s</div></div>'
-                % html_text)
-    else:
-        # Фолбэк: оборачиваем текст в pre, как это делает агент.
-        import html as _html
-        html = ('<div class="mcp-answer"><div class="mcp-answer-head">'
-                'MCP-инструмент: <b>show_board</b>({})</div>'
-                '<div class="mcp-answer-body"><pre>%s</pre></div></div>'
-                % _html.escape(str(board_text)))
-    label = model or "MCP"
-    return {"ok": True, "text": text, "html": html,
-            "answers": [{"label": label, "model": label, "text": text}],
-            "meta": "MCP: show_board"}
 
 
 def _set_agent(agent):
@@ -1290,6 +1237,95 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             "error": result.get("error"),
         }
 
+    def _files_payload(self, spec, model_label, root):
+        """Выполняет сценарий /files и возвращает payload для чата."""
+        from rtk_app import html_report
+        scenario = str((spec or {}).get("scenario") or "help")
+        if scenario == "help":
+            result = {
+                "ok": True, "scenario": "help", "error": None,
+                "text": "\n".join([
+                    "## Работа с файлами",
+                    "",
+                    "`/files find <запрос>` — найти использования по файлам.",
+                    "`/files docs [base] [head] [--apply]` — обновить docs по diff.",
+                    "`/files new <adr|changelog|readme> <тема> [--apply]` — создать файл.",
+                    "`/files edit [путь] <инструкция> [--apply]` — изменить файл (путь можно не указывать).",
+                    "",
+                    "По умолчанию показывается diff; запись — с `--apply`.",
+                ]),
+                "files": [], "changed": [], "diff": "", "applied": False,
+                "rag_used": False, "usage": None,
+            }
+        elif scenario == "find":
+            result = file_tasks.run_find(
+                root, (spec or {}).get("query") or "",
+                max_results=getattr(config, "FILES_MAX_RESULTS", 200))
+        elif scenario in ("docs", "new", "edit"):
+            if not model_label:
+                return {
+                    "ok": False, "files_task": True, "scenario": scenario,
+                    "text": "## Файлы\n\n_Выберите модель — без неё нельзя "
+                            "сгенерировать изменения._",
+                    "html": "", "answers": [], "files": [], "changed": [],
+                    "diff": "", "applied": False, "rag_used": False,
+                    "usage": None, "error": "не выбрана модель",
+                }
+            if scenario == "edit":
+                result = file_tasks.run_edit_file(
+                    root, (spec or {}).get("path") or "",
+                    (spec or {}).get("instruction") or "",
+                    model=model_label,
+                    apply=bool((spec or {}).get("apply")))
+            elif scenario == "docs":
+                result = file_tasks.run_update_docs(
+                    root, base=(spec or {}).get("base") or "HEAD~1",
+                    head=(spec or {}).get("head") or "HEAD",
+                    model=model_label,
+                    apply=bool((spec or {}).get("apply")),
+                    use_rag=bool((spec or {}).get("use_rag", True)))
+            else:
+                result = file_tasks.run_generate_file(
+                    root, kind=(spec or {}).get("kind") or "adr",
+                    topic=(spec or {}).get("topic") or "",
+                    model=model_label,
+                    apply=bool((spec or {}).get("apply")),
+                    use_rag=bool((spec or {}).get("use_rag", True)),
+                    path=(spec or {}).get("path") or "")
+        else:
+            result = {"ok": False, "scenario": scenario, "text": "",
+                      "error": "неизвестный сценарий /files"}
+        text = str(result.get("text") or "")
+        if not text:
+            text = "## Файлы\n\n_%s_" % (result.get("error") or
+                                         "операция не выполнена")
+        try:
+            html = html_report.text_to_html_paragraphs(text)
+        except Exception:                        # noqa: BLE001
+            html = ""
+        label = model_label or "files"
+        answers = []
+        if result.get("ok") and scenario in ("docs", "new", "edit"):
+            answers = [{"label": label, "model": label, "text": text,
+                        "temperature": None}]
+        return {
+            "ok": bool(result.get("ok")),
+            "files_task": True,
+            "scenario": scenario,
+            "text": text,
+            "html": html,
+            "answers": answers,
+            "files": result.get("files") or [],
+            "input_files": result.get("input_files") or [],
+            "changed": result.get("changed") or [],
+            "diff": result.get("diff") or "",
+            "applied": bool(result.get("applied")),
+            "written": result.get("written") or [],
+            "rag_used": bool(result.get("rag_used")),
+            "usage": result.get("usage"),
+            "error": result.get("error"),
+        }
+
     def _handle_ask(self):
         """Принимает запрос пользователя и передаёт его агенту.
 
@@ -1327,31 +1363,17 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         support_spec = parse_support(question)
         is_support = support_spec is not None
 
-        # «ДОСКА» — особый сервер ВЫВОДА: запрос к ней обрабатывается через
-        # MCP-путь (с предварительным обновлением данных композицией) и
-        # НЕЗАВИСИМО от чекбокса «Использовать MCP». Для «Доски» применяется
-        # модель из селекта «модель MCP» (_ServerState.mcp_model), поэтому
-        # выбранная сверху модель и персона не нужны.
-        doska_srv = getattr(config, "COMPOSITION_DOSKA_SERVER", "doska")
-        is_doska = (_ServerState.mcp_server or "") == doska_srv
-        # РЕЖИМ КОМПОЗИЦИИ: пока композиция активна, ФОНОМ работают серверы
-        # «календарь → замполит → завхоз» (отрабатывают логику и обновляют
-        # данные), а ЛЮБОЕ обращение в чате ВСЕГДА идёт К «ДОСКЕ» — серверу
-        # ВЫВОДА (таблица «событие + время»). Выбранный в списке сервер и
-        # выбранная сверху модель/персона при этом НЕ важны: отвечает «Доска».
-        composition_active = bool(_ServerState.composition_running)
-        # На время композиции цель чата — «Доска» (детерминированный вывод).
-        target_is_board = is_doska or composition_active
-        # ЗАПРОС ИДЁТ ЧЕРЕЗ MCP, если ВКЛЮЧЁН ЧЕКБОКС «Использовать MCP»,
-        # ЛИБО выбран сервер «Доска» (запрос к ней не зависит от чекбокса),
-        # ЛИБО активна КОМПОЗИЦИЯ (тогда цель — всегда «Доска»).
-        # ВАЖНО: сам ФАКТ выбора сервера в списке (без чекбокса и без
-        # композиции) НЕ включает MCP-режим.
-        via_mcp = bool(_ServerState.mcp_enabled or target_is_board)
-        # ВАЖНО: /help и /review — ЯВНЫЕ команды. Они не должны
-        # перехватываться MCP-режимом, «Доской» или композицией: иначе вместо
-        # справки/ревью вернётся таблица MCP-сервера.
-        if is_help or is_review or is_support:
+        # КОМАНДА /files (docs/Final_task.md, задача 4): работа с файлами
+        # проекта — поиск, обновление docs, генерация ADR/CHANGELOG.
+        files_spec = parse_files(question)
+        is_files = files_spec is not None
+
+        # MCP работает только через выбранный сервер при включённом чекбоксе.
+        via_mcp = bool(_ServerState.mcp_enabled)
+        # ВАЖНО: /help, /review, /support и /files — ЯВНЫЕ команды. Они не
+        # должны перехватываться MCP-режимом: иначе вместо справки/ревью
+        # вернётся таблица MCP-сервера.
+        if is_help or is_review or is_support or is_files:
             via_mcp = False
 
         # РЕЖИМ ОТВЕТА зависит от наличия персон:
@@ -1392,7 +1414,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     print("[LOCAL] по умолчанию используется %r (%s)"
                           % (local_label, "запущена"), flush=True)
             if (selected is None and not via_mcp and not is_help
-                    and not is_review):
+                    and not is_review and not is_files):
                 return self._send_json(200, {
                     "ok": False,
                     "error": "Не выбрана ни одна модель. Включите модель для "
@@ -1422,6 +1444,27 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                      model_label), flush=True)
             return self._send_json(200, self._review_payload(
                 review_spec, model_label, repo_dir))
+
+        # /files: работа с файлами проекта. Поиск работает без модели;
+        # docs/new требуют выбранную модель (или запущенную локальную).
+        if is_files:
+            model_label = ""
+            if selected:
+                model_label = str((selected[0] or {}).get("label")
+                                  or "").strip()
+            if not model_label:
+                model_label = _running_local_label()
+            repo_dir = (self.session.rag_settings().get("docs_dir")
+                        or config.RAG_DOCS_DIR)
+            if not os.path.isdir(str(repo_dir or "")):
+                print("[FILES] каталог %r не найден — использую BASE_DIR"
+                      % repo_dir, flush=True)
+                repo_dir = config.BASE_DIR
+            print("[FILES] scenario=%s root=%r model=%r apply=%s"
+                  % (files_spec.get("scenario"), repo_dir, model_label,
+                     files_spec.get("apply")), flush=True)
+            return self._send_json(200, self._files_payload(
+                files_spec, model_label, repo_dir))
 
         # /support: данные тикета/пользователя (MCP-сервер «Поддержка»,
         # fallback — JSON напрямую). Контекст обращения добавляется в системный
@@ -1643,81 +1686,101 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             return self._send_json(200, self._help_payload(
                 question, help_git_note, rag_hits, rag_docs_dir))
 
-        # НАПОМИНАНИЯ: АВТОМАТИЧЕСКИ забираем наступившие напоминания из
-        # календаря (MCP-инструмент run_due) и доставляем их в чат ОТДЕЛЬНЫМ
-        # сообщением (красный фон) — независимо от того, что спросил
-        # пользователь. Так напоминание приходит САМО, без специального
-        # запроса «покажи напоминания».
-        reminders = _collect_due_reminders()
+        # Календарь удалён — автоматических напоминаний нет.
+        reminders = []
 
-        # ВЕТКА MCP: запрос идёт ЧЕРЕЗ MCP, если MCP включён в интерфейсе ЛИБО
-        # выбран сервер «Доска» (запрос к ней не зависит от чекбокса).
-        # В этой ветке модель выбирает инструмент, инструмент вызывается на
-        # MCP-сервере, его результат возвращается как ответ.
-        if via_mcp:
-            print("[MCP] запрос идёт через MCP (server=%r, model=%r, "
-                  "board=%s, composition=%s)"
-                  % (_ServerState.mcp_server or "default",
-                     _ServerState.mcp_model or "auto",
-                     target_is_board, composition_active), flush=True)
-            # ЦЕЛЬ ЗАПРОСА — СЕРВЕР ВЫВОДА «ДОСКА»: так при активной
-            # композиции ЛЮБОЕ обращение в чате всегда выводит таблицу
-            # «событие + время», независимо от выбранного в списке сервера.
-            # Перед выдачей таблицы ОБНОВЛЯЕМ данные до актуального состояния,
-            # прогнав композицию заново (календарь -> замполит -> завхоз):
-            # так на доске всегда свежие события, даже если фоновый тик ещё
-            # не успел их обновить.
-            if target_is_board:
-                print("[MCP] запрос к «Доске»: обновляю данные композицией…",
-                      flush=True)
-                try:
-                    refresh = _composition_run(verbose=False)
-                    if not refresh.get("ok"):
-                        print("[MCP] обновление «Доски» не удалось: %s"
-                              % refresh.get("error"), flush=True)
-                except Exception as exc:
-                    print("[MCP] обновление «Доски» не удалось: %s" % exc,
-                          flush=True)
-                # «ДОСКА» — сервер ВЫВОДА: инструмент показываем ДЕТЕРМИНИРОВАННО
-                # (show_board_html + show_board), НЕ доверяя выбор инструмента
-                # модели. Это исключает «ошибку доски», когда модель выбирала
-                # ping/неверный инструмент.
-                result = _board_direct_result(
-                    doska_srv, model=(_ServerState.mcp_model or None))
-                if result.get("ok"):
-                    self.session.append_turn(question, {
-                        "role": "assistant",
-                        "content": result.get("text", ""),
-                        "html": result.get("html", ""),
-                        "answers": result.get("answers", []),
-                        "meta": result.get("meta", ""),
-                        "usage": result.get("usage"),
-                    })
-                    result.update(self.session.full_state())
-                if reminders:
-                    result["reminders"] = reminders
-                return self._send_json(200, result)
-            tools = []
-            if mcp_client is not None:
-                listed = mcp_client.mcp_list_tools(
-                    server_id=(_ServerState.mcp_server or None))
-                if listed.get("ok"):
-                    tools = listed.get("tools", [])
-                else:
-                    print("[MCP] не удалось получить список инструментов: %s"
-                          % listed.get("error"), flush=True)
+        # ЕСТЕСТВЕННОЕ РЕДАКТИРОВАНИЕ В ЧАТЕ: «добавь серый фон…»,
+        # «измени MODEL…». Не ждём, пока MCP выберет read-only поиск:
+        # читаем файл, просим модель вернуть полное новое содержимое,
+        # строим diff и при явной команде применяем запись.
+        natural_create = (not (is_help or is_review or is_support or is_files)
+                          and _is_chat_create_request(question))
+        natural_edit = (not (is_help or is_review or is_support or is_files)
+                        and _is_chat_edit_request(question))
+        if natural_create or natural_edit:
+            edit_model = ""
+            if selected:
+                edit_model = str((selected[0] or {}).get("label") or "").strip()
+            if not edit_model:
+                edit_model = (_running_local_label() or _ServerState.mcp_model
+                              or "")
+            if natural_create:
+                target_path = _chat_create_path(question)
+                print("[FILES] естественное создание: path=%r model=%r"
+                      % (target_path, edit_model), flush=True)
+                result = self._files_payload({
+                    "scenario": "new", "path": target_path,
+                    "topic": question, "kind": "file",
+                    "apply": _chat_edit_apply(question),
+                }, edit_model, rag_docs_dir)
+            else:
+                print("[FILES] естественное редактирование: model=%r apply=%s"
+                      % (edit_model, _chat_edit_apply(question)), flush=True)
+                result = self._files_payload({
+                    "scenario": "edit", "path": "", "instruction": question,
+                    "apply": _chat_edit_apply(question),
+                }, edit_model, rag_docs_dir)
+        # ВЕТКА MCP: запрос идёт через MCP, если включён чекбокс.
+        # Модель выбирает инструмент, инструмент вызывается на MCP-сервере,
+        # его результат возвращается как ответ.
+        elif via_mcp:
+            selected_server = _ServerState.mcp_server or _mcp_auto_id()
+            auto_mode = _mcp_is_auto(selected_server)
+            print("[MCP] запрос идёт через MCP (server=%r, auto=%s, model=%r)"
+                  % (selected_server, auto_mode,
+                     _ServerState.mcp_model or "auto"), flush=True)
             # Модель для MCP-запроса — из селекта «модель MCP».
             # git-инструментам «Проекта» подставляем ЦЕЛЕВУЮ папку RAG
             # (docs_dir), иначе git_status/git_diff/list_files смотрели бы
             # репозиторий ассистента (1310), а не проиндексированный проект.
             tool_defaults = None
             if os.path.isdir(str(rag_docs_dir or "")):
-                tool_defaults = {"repo": str(rag_docs_dir)}
-            result = self.agent.answer_via_mcp(
-                question, tools,
-                model=(_ServerState.mcp_model or None),
-                server_id=(_ServerState.mcp_server or None),
-                tool_defaults=tool_defaults)
+                # git-инструментам «Проекта» — repo, файловым «Файлов» — root.
+                tool_defaults = {"repo": str(rag_docs_dir),
+                                 "root": str(rag_docs_dir)}
+            if auto_mode:
+                # АВТО: отдаём модели инструменты ВСЕХ серверов, она выбирает
+                # сервер по смыслу запроса (git -> project, файл -> files,
+                # тикет -> support).
+                server_tools = []
+                if mcp_client is not None:
+                    try:
+                        server_list = mcp_client.mcp_servers()
+                    except Exception as exc:
+                        server_list = []
+                        print("[MCP] список серверов недоступен: %s" % exc,
+                              flush=True)
+                    for srv in server_list:
+                        sid = str(srv.get("id"))
+                        listed = mcp_client.mcp_list_tools(server_id=sid)
+                        if listed.get("ok"):
+                            server_tools.append({
+                                "id": sid,
+                                "label": srv.get("label") or sid,
+                                "tools": listed.get("tools") or [],
+                            })
+                        else:
+                            print("[MCP] %s: список инструментов недоступен: %s"
+                                  % (sid, listed.get("error")), flush=True)
+                result = self.agent.answer_via_mcp_auto(
+                    question, server_tools,
+                    model=(_ServerState.mcp_model or None),
+                    tool_defaults=tool_defaults, history=history)
+            else:
+                tools = []
+                if mcp_client is not None:
+                    listed = mcp_client.mcp_list_tools(
+                        server_id=(selected_server or None))
+                    if listed.get("ok"):
+                        tools = listed.get("tools", [])
+                    else:
+                        print("[MCP] не удалось получить список инструментов: %s"
+                              % listed.get("error"), flush=True)
+                result = self.agent.answer_via_mcp(
+                    question, tools,
+                    model=(_ServerState.mcp_model or None),
+                    server_id=(selected_server or None),
+                    tool_defaults=tool_defaults, history=history)
         else:
             answer_kwargs = {
                 "max_tokens": max_tokens,
@@ -2219,84 +2282,31 @@ class WebRequestHandler(BaseHTTPRequestHandler):
 
         if action == "set":
             with _ServerState.mcp_lock:
-                # ВКЛЮЧЕНИЕ чекбокса «Использовать MCP» — ОСТАНАВЛИВАЕТ
-                # композицию и переводит сервер в режим отдельных серверов
-                # по выбору (композиция и MCP взаимоисключающие).
-                if "enabled" in data and bool(data.get("enabled")):
-                    if _ServerState.composition_running:
-                        _ServerState.composition_running = False
-                        _stop_composition_tick()
-                        print("[MCP] включён режим MCP — композиция остановлена.",
-                              flush=True)
                 if "enabled" in data:
+                    _ServerState.composition_running = False
                     _ServerState.mcp_enabled = bool(data.get("enabled"))
                 if "model" in data:
                     _ServerState.mcp_model = str(data.get("model") or "")
                 if "server" in data:
-                    _ServerState.mcp_server = str(data.get("server") or "")
+                    requested = str(data.get("server") or "")
+                    valid = _mcp_valid_server_ids()
+                    _ServerState.mcp_server = (requested if requested in valid
+                                               else getattr(
+                                                   config,
+                                                   "MCP_SERVER_DEFAULT",
+                                                   _mcp_auto_id()))
                 _save_mcp_settings()
             return self._send_json(200, _mcp_state_payload(check=False))
 
         if action == "status":
             return self._send_json(200, _mcp_state_payload(check=True))
 
-        if action == "compose":
-            # КНОПКА «Запустить композицию»: прогоняем пайплайн
-            # календарь -> замполит -> завхоз и возвращаем отчёт.
-            #
-            # ВАЖНО: композиция и чекбокс «Использовать MCP» —
-            # ВЗАИМОИСКЛЮЧАЮЩИЕ. Запуск композиции:
-            #   * ВЫКЛЮЧАЕТ чекбокс «Использовать MCP» (mcp_enabled = False);
-            #   * включает РЕЖИМ КОМПОЗИЦИИ (composition_running = True) —
-            #     композиция работает САМА ПО СЕБЕ (фоновый тик);
-            #   * при этом ЗАПРОСЫ в чат обслуживает МОДЕЛЬ из селекта
-            #     «Модель MCP» через MCP-путь (см. _handle_ask: при активной
-            #     композиции via_mcp = True, модель берётся из mcp_model).
-            with _ServerState.mcp_lock:
-                _ServerState.mcp_enabled = False
-                _ServerState.composition_running = True
-                _save_mcp_settings()
-            # Запускаем фоновый тик композиции (если ещё не запущен).
-            _start_composition_tick()
-            # МОДЕЛЬ: сообщение о запуске формирует модель из селекта
-            # «Модель MCP» (_ServerState.mcp_model). Если модель не задана —
-            # берётся шаблон.
-            report = _composition_run(verbose=True)
-            payload = _mcp_state_payload(check=False)
-            payload["composition"] = report
-            # Отдельное СООБЩЕНИЕ для чата: какие MCP-серверы задействованы
-            # и что каждый делает (название + краткое описание). Текст генерит
-            # выбранная модель, шаблон — фолбэк.
-            template = _format_composition_message(report)
-            chooser = getattr(self, "agent", None)
-            model_label = _ServerState.mcp_model or ""
-            if chooser is not None and hasattr(chooser, "compose_message"):
-                gen = chooser.compose_message(
-                    _composition_report_text(report), model=model_label or None,
-                    fallback=template)
-                payload["composition_message"] = gen.get("text") or template
-                payload["composition_message_model"] = gen.get("model") or ""
-                payload["composition_message_ok"] = bool(gen.get("ok"))
-            else:
-                payload["composition_message"] = template
-                payload["composition_message_model"] = ""
-                payload["composition_message_ok"] = False
-            print("[COMPOSE] композиция запущена (MCP выключен); сообщение "
-                  "сформировано моделью %r (ok=%s)"
-                  % (payload.get("composition_message_model") or "шаблон",
-                     payload.get("composition_message_ok")), flush=True)
-            return self._send_json(200, payload)
-
-        if action == "compose_stop":
-            # Явная ОСТАНОВКА режима композиции (возврат к отдельным серверам
-            # по выбору). Обычно вызывается автоматически при включении
-            # чекбокса «Использовать MCP», но можно и напрямую.
-            with _ServerState.mcp_lock:
-                _ServerState.composition_running = False
-                _stop_composition_tick()
-                _save_mcp_settings()
-            print("[COMPOSE] режим композиции остановлен.", flush=True)
-            return self._send_json(200, _mcp_state_payload(check=False))
+        if action in ("compose", "compose_stop"):
+            return self._send_json(200, {
+                "ok": False,
+                "error": "Композиция MCP удалена. Доступны серверы project, "
+                         "support, files и режим auto.",
+            })
 
         # action == "state" и всё прочее — отдаём состояние без проверки.
         return self._send_json(200, _mcp_state_payload(check=False))
@@ -2518,60 +2528,6 @@ def _open_browser_later(url, delay=1.0):
     threading.Thread(target=_job, daemon=True).start()
 
 
-def _composition_tick_loop(interval, stop_event):
-    """Фоновый ТИК композиции: раз в interval секунд прогоняет пайплайн.
-
-    По задаче (docs/task5.md) «календарь проверяет каждую минуту состояние
-    событий на ближайшие 7 дней». Тик работает ТОЛЬКО в режиме композиции:
-    его останавливают (stop_event) при включении чекбокса «Использовать MCP».
-    Ошибки логируются и НЕ останавливают цикл.
-    """
-    print("[COMPOSE] фоновый тик композиции: каждые %d c." % interval, flush=True)
-    while not stop_event.is_set():
-        # Ждём интервал, но просыпаемся сразу при остановке.
-        if stop_event.wait(interval):
-            break
-        if not _ServerState.composition_running:
-            break
-        try:
-            report = _composition_run(verbose=False)
-            if not report.get("ok"):
-                print("[COMPOSE] тик: %s" % report.get("error"), flush=True)
-        except Exception as exc:
-            print("[COMPOSE] тик не удался: %s" % exc, flush=True)
-    print("[COMPOSE] фоновый тик композиции остановлен.", flush=True)
-
-
-def _start_composition_tick():
-    """Запускает фоновый тик композиции (режим композиции ВКЛючён).
-
-    Если тик уже запущен — ничего не делает. Тик перестаёт работать при
-    выключении режима композиции (см. _stop_composition_tick).
-    """
-    interval = int(getattr(config, "COMPOSITION_TICK_SECONDS", 0) or 0)
-    if interval <= 0:
-        print("[COMPOSE] фоновый тик выключен (COMPOSITION_TICK_SECONDS=0).",
-              flush=True)
-        return
-    if _ServerState.composition_thread and _ServerState.composition_thread.is_alive():
-        return
-    stop_event = threading.Event()
-    _ServerState.composition_stop = stop_event
-    th = threading.Thread(target=_composition_tick_loop,
-                          args=(interval, stop_event), daemon=True)
-    _ServerState.composition_thread = th
-    th.start()
-
-
-def _stop_composition_tick():
-    """Останавливает фоновый тик композиции (режим композиции ВЫКлючён)."""
-    stop_event = _ServerState.composition_stop
-    if stop_event is not None:
-        stop_event.set()
-    _ServerState.composition_stop = None
-    _ServerState.composition_thread = None
-
-
 def serve(agent_or_key, host=None, port=None, open_page=True, agent=None):
     """Запускает сервер, используя агента в качестве единой сущности.
 
@@ -2602,15 +2558,8 @@ def serve(agent_or_key, host=None, port=None, open_page=True, agent=None):
     url = "http://%s:%s/" % (shown_host, shown_port)
     print("[WEB] Сервер запущен: %s" % url)
     print("[WEB] Агент обслуживает модели: %s" % agent.label)
-    # Фоновый ТИК композиции запускаем ТОЛЬКО если режим композиции был
-    # сохранён как активный (взаимоисключает чекбокс «Использовать MCP»).
-    if _ServerState.composition_running and not _ServerState.mcp_enabled:
-        print("[COMPOSE] восстановлен режим композиции из настроек.", flush=True)
-        _start_composition_tick()
-    else:
-        _ServerState.composition_running = False
-        print("[COMPOSE] режим композиции не активен (работают отдельные "
-              "серверы по выбору).", flush=True)
+    _ServerState.composition_running = False
+    print("[MCP] доступны серверы: project, support, files", flush=True)
     if open_page:
         _open_browser_later(url)
     print("[WEB] Остановка: нажмите Ctrl+C.")
@@ -2619,7 +2568,6 @@ def serve(agent_or_key, host=None, port=None, open_page=True, agent=None):
     except KeyboardInterrupt:
         print("\n[WEB] Остановка...")
     finally:
-        _stop_composition_tick()
         httpd.server_close()
 
 

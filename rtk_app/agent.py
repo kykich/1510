@@ -12,6 +12,8 @@
 (HTTP-обработчик) лишь передаёт пользовательский ввод и получает ответ.
 """
 import json
+import os
+import re
 import time
 import urllib.parse
 from datetime import datetime, timedelta
@@ -19,29 +21,43 @@ from datetime import datetime, timedelta
 from . import rag_llm
 from . import config, deepseek, gigachat, html_report, local_llm
 
-__all__ = ["Agent", "GIT_TOOLS", "apply_tool_defaults"]
+__all__ = ["Agent", "GIT_TOOLS", "FILES_TOOLS", "apply_tool_defaults"]
 
 # Git-инструменты MCP-сервера «Проект»: им сервер подставляет ЦЕЛЕВУЮ папку
 # RAG (docs_dir), чтобы git_status/git_diff/list_files не уходили в репозиторий
 # ассистента. Явно переданный аргумент repo всегда имеет приоритет.
 GIT_TOOLS = frozenset(("git_branch", "git_status", "git_diff", "list_files"))
+# Инструменты MCP-сервера «Файлы проекта»: им подставляется root (та же
+# целевая папка), чтобы модель не работала с репозиторием ассистента.
+FILES_TOOLS = frozenset((
+    "list_files", "read_file", "read_many_files", "search_files", "file_info",
+    "preview_file_change", "apply_file_change",
+))
 
 
-def apply_tool_defaults(tool_name, arguments, defaults=None):
+def apply_tool_defaults(tool_name, arguments, defaults=None, server_id=None):
     """Дополняет аргументы MCP-инструмента значениями по умолчанию.
 
-    defaults — например {"repo": "<папка RAG>"}. Подставляется ТОЛЬКО
-    git-инструментам (GIT_TOOLS) и только если аргумент не задан или пуст:
-    явно указанный repo сохраняется.
+    defaults — например {"repo": "<папка RAG>", "root": "<папка RAG>"}.
+    Для git-инструментов (GIT_TOOLS) подставляется repo, для файловых
+    (FILES_TOOLS) — root. server_id помогает различить одноимённый
+    list_files у серверов project и files. Явно переданный аргумент всегда
+    имеет приоритет.
     """
     args = dict(arguments or {})
-    if not defaults or tool_name not in GIT_TOOLS:
+    if not defaults:
         return args
-    for key, value in (defaults or {}).items():
-        if value in (None, ""):
-            continue
-        if not args.get(key):
-            args[key] = value
+    if server_id == "files" and tool_name in FILES_TOOLS:
+        key = "root"
+    elif tool_name in GIT_TOOLS:
+        key = "repo"
+    elif tool_name in FILES_TOOLS:
+        key = "root"
+    else:
+        return args
+    value = (defaults or {}).get(key)
+    if value not in (None, "") and not args.get(key):
+        args[key] = value
     return args
 
 
@@ -717,15 +733,125 @@ class Agent:
         ]
         return "\n".join(lines)
 
+    @staticmethod
+    def _looks_like_file_token(value):
+        """Похоже ли значение на имя файла/путь (README, rtk_console.py)."""
+        token = str(value or "").strip().strip("\"'")
+        if not token or len(token) > 160 or any(ch.isspace() for ch in token):
+            return False
+        if any(sep in token for sep in ("/", "\\", "_", ".")):
+            return True
+        return token.lower() in ("readme", "changelog", "dockerfile",
+                                 "makefile")
+
+    @staticmethod
+    def _is_file_content_question(question):
+        """Вопрос о содержимом/настройках конкретного файла (а не поиск)."""
+        low = str(question or "").lower()
+        hints = ("модел", "содержим", "что внутри", "что в файле",
+                 "какие настройки", "настройк", "прочитай", "покажи",
+                 "как работает", "что использует", "какой api", "какой ии",
+                 "функци", "реализац")
+        return any(hint in low for hint in hints)
+
+    @staticmethod
+    def _is_read_files_question(question):
+        """Просят прочитать содержимое нескольких файлов, а не список."""
+        low = str(question or "").lower()
+        hints = ("прочитай", "прочита", "прочти", "прочитать",
+                 "содержимое", "содержим", "что в файлах", "перескаж",
+                 "изучи", "анализ")
+        return any(hint in low for hint in hints)
+
+    @staticmethod
+    def _mcp_history_messages(history, limit=6, max_chars=1500):
+        """Последние реплики диалога для MCP-выбора инструмента."""
+        out = []
+        for msg in list(history or [])[-limit:]:
+            if not isinstance(msg, dict):
+                continue
+            role = str(msg.get("role") or "")
+            content = str(msg.get("content") or "").strip()
+            if role in ("user", "assistant") and content:
+                out.append({"role": role, "content": content[:max_chars]})
+        return out
+
+    @staticmethod
+    def _question_root(question):
+        """Абсолютная папка из вопроса, если она существует.
+
+        Нужна, когда пользователь пишет «файл ... в G:\\project\\subdir»,
+        а RAG/настройки по умолчанию указывают на родительский проект.
+        """
+        raw = str(question or "")
+        candidates = re.findall(r"[A-Za-z]:[\\/][^\s\"'<>|]+", raw)
+        for value in sorted(candidates, key=len, reverse=True):
+            path = value.rstrip(".,;:)]}")
+            if os.path.isfile(path):
+                path = os.path.dirname(path)
+            if os.path.isdir(path):
+                return os.path.abspath(path)
+        return ""
+
+    def mcp_select_system_prompt_multi(self, servers):
+        """Системный промпт для выбора СЕРВЕРА и инструмента MCP.
+
+        servers — [{id, label, tools:[{name, description, params}]}]. Модель
+        должна вернуть {"server": "...", "tool": "...", "arguments": {...}}.
+        """
+        lines = [
+            "Ты — ассистент, который решает задачу, ВЫЗЫВАЯ инструменты MCP.",
+            "Доступны MCP-серверы:",
+        ]
+        for srv in servers or []:
+            lines.append("  * %s — %s" % (srv.get("id"),
+                                          srv.get("label") or srv.get("id")))
+        lines += [
+            "Правила выбора:",
+            "- вопрос про git, ветку, коммиты, diff, изменения -> project;",
+            "- вопрос про содержимое файла, поиск по файлам, README/docs/код -> files;",
+            "  (для содержимого выбирай files.read_file/search_files, НЕ project.list_files)",
+            "- вопрос про тикет, пользователя, обращение, поддержку -> support.",
+            "- при сомнении между project.list_files и files.list_files выбирай files.",
+            "- если в запросе есть имя файла или путь (например, rtk_console,",
+            "  README.md, G:\\project\\file.py) — ОБЯЗАТЕЛЬНО вызови files.read_file",
+            "  (для поиска по файлам — files.search_files). НЕ возвращай tool:null",
+            "  и НЕ отвечай «данных нет», пока не прочитал файл.",
+            "- если просят прочитать НЕСКОЛЬКО файлов или «файлы проекта» —",
+            "  используй files.read_many_files; files.list_files даёт только имена.",
+            "Инструменты по серверам:",
+        ]
+        for srv in servers or []:
+            sid = str(srv.get("id") or "")
+            label = str(srv.get("label") or sid)
+            lines.append("Сервер %s (%s):" % (sid, label))
+            for t in srv.get("tools") or []:
+                params = ", ".join(t.get("params") or []) or "без аргументов"
+                desc = (t.get("description") or "").strip()
+                lines.append("  * %s.%s(%s) — %s"
+                             % (sid, t.get("name"), params, desc))
+        lines += [
+            "",
+            "Выбери ОДИН наиболее подходящий инструмент и ОДИН сервер.",
+            "Ответь СТРОГО одним JSON-объектом без пояснений:",
+            '  {"server": "<project|files|support>",'
+            ' "tool": "<имя инструмента>", "arguments": {<аргументы>}}',
+            "Если ни один инструмент не подходит, верни:",
+            '  {"server": "", "tool": null, "answer": "<краткий ответ>"}',
+        ]
+        return "\n".join(lines)
+
     def answer_via_mcp(self, question, tools, model=None, temperature=None,
-                       max_tokens=None, server_id=None, tool_defaults=None):
+                       max_tokens=None, server_id=None, tool_defaults=None,
+                       history=None):
         """Отвечает на запрос через MCP: модель выбирает инструмент и аргументы,
         затем инструмент вызывается на MCP-сервере, а его результат возвращается
         как ответ.
 
-        tool_defaults — значения аргументов по умолчанию для git-инструментов
-        (например, {"repo": "<целевая папка RAG>"}), чтобы git_status/diff/
-        list_files работали с проиндексированным проектом, а не с репозиторием
+        tool_defaults — значения аргументов по умолчанию: для git-инструментов
+        ({"repo": "<целевая папка RAG>"}), для файловых
+        ({"root": "<та же папка>"}). Так list_files/git_status и файловые
+        инструменты работают с проиндексированным проектом, а не с репозиторием
         ассистента.
 
         Возвращает dict того же вида, что и answer(): ok/html/text/answers/meta/
@@ -750,8 +876,9 @@ class Agent:
         # 1) Модель выбирает инструмент и аргументы.
         messages = [
             {"role": "system", "content": self.mcp_select_system_prompt(tools)},
-            {"role": "user", "content": question},
         ]
+        messages += self._mcp_history_messages(history)
+        messages.append({"role": "user", "content": question})
         trace.append({"kind": "llm", "model": label,
                       "title": "LLM: выбор MCP-инструмента",
                       "detail": "инструментов: %d" % len(tools or [])})
@@ -771,19 +898,20 @@ class Agent:
                        "total": input_total + output_total, "history": 0})
 
         decision = self._parse_mcp_decision(single["content"])
-        tool_name = (decision or {}).get("tool")
+        tool_name = str((decision or {}).get("tool") or "").strip() or None
         # Целевая папка RAG подставляется в аргументы git-инструментов
         # (repo=...), иначе они работают с репозиторием ассистента.
         args = apply_tool_defaults(tool_name,
                                    (decision or {}).get("arguments"),
-                                   tool_defaults)
+                                   tool_defaults, server_id=server_id)
 
         # 2a) Инструмент не выбран — отдаём прямой ответ модели.
         if not tool_name:
             direct = (decision or {}).get("answer") or single["content"]
             trace.append({"kind": "branch", "title": "MCP: инструмент не нужен",
                           "detail": "прямой ответ модели"})
-            html = self._mcp_answer_html(question, direct, tool_name=None)
+            html = self._mcp_answer_html(question, direct, tool_name=None,
+                                         formatted=True)
             text = "%s:\n%s" % (label, direct)
             trace.append({"kind": "exit", "ok": True,
                           "title": "Готово: ответ модели (без MCP)"})
@@ -823,12 +951,35 @@ class Agent:
                 mcp={"tool": tool_name, "arguments": args,
                      "result": call.get("text", "")})
 
-        result_text = call.get("text", "")
+        raw_result = call.get("text", "")
+        result_text = raw_result
+        formatted = False
+        usage = {"input": input_total, "output": output_total,
+                 "total": input_total + output_total, "history": 0}
         trace.append({"kind": "llm", "model": tool_name,
                       "title": "MCP: результат инструмента",
-                      "detail": result_text[:200]})
+                      "detail": raw_result[:200]})
+        if server_id == "files" and raw_result.lstrip().startswith("{"):
+            try:
+                data = json.loads(raw_result)
+            except Exception:
+                data = None
+            if isinstance(data, dict) and data.get("ok") is not False:
+                summary = self._mcp_summarize_result(
+                    question, server_id, tool_name, raw_result,
+                    provider, model_name, label, temp, mt, trace=trace)
+                summary_text = str(summary.get("content") or "").strip()
+                if summary.get("ok") and summary_text:
+                    result_text = summary_text
+                    input_total += int(summary.get("prompt_tokens") or 0)
+                    output_total += int(summary.get("completion_tokens") or 0)
+                    usage = {"input": input_total, "output": output_total,
+                             "total": input_total + output_total,
+                             "history": 0}
+                    formatted = True
         html = self._mcp_answer_html(question, result_text, tool_name=tool_name,
-                                     arguments=args)
+                                     arguments=args, server_id=server_id,
+                                     formatted=formatted)
         text = "%s (MCP: %s):\n%s" % (label, tool_name, result_text)
         trace.append({"kind": "exit", "ok": True,
                       "title": "Готово: ответ через MCP"})
@@ -843,11 +994,247 @@ class Agent:
             meta=self._build_meta(
                 datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 input_total + output_total, True),
-            trace=trace,
-            usage={"input": input_total, "output": output_total,
-                   "total": input_total + output_total, "history": 0},
+            trace=trace, usage=usage,
             memory_used={"working": 0, "longterm": 0},
-            mcp={"tool": tool_name, "arguments": args, "result": result_text})
+            mcp={"tool": tool_name, "arguments": args, "result": raw_result})
+
+    def _mcp_summarize_result(self, question, server_id, tool_name,
+                              result_text, provider, model_name, label,
+                              temperature=None, max_tokens=None, trace=None):
+        """Просит модель ответить на вопрос по результату MCP-инструмента.
+
+        Нужно для файловых инструментов: read_file возвращает JSON/весь текст
+        файла, а пользователю нужен краткий ответ в Markdown.
+        """
+        prompt = [
+            {"role": "system", "content": (
+                "Ты — ассистент разработчика. Ниже результат MCP-инструмента. "
+                "Ответь на вопрос пользователя по существу, кратко, на русском. "
+                "Оформляй ответ Markdown (заголовки, списки, `код`). "
+                "Не выводи весь файл и не пересказывай JSON-обёртку. "
+                "Опирайся ТОЛЬКО на результат; если ответа в нём нет — "
+                "так и скажи.")},
+            {"role": "user", "content": (
+                "Вопрос: %s\n\nРезультат %s.%s:\n%s"
+                % (question, server_id, tool_name,
+                   str(result_text or "")[:12000]))},
+        ]
+        if trace is not None:
+            trace.append({"kind": "llm", "model": label,
+                          "title": "LLM: оформление ответа по MCP",
+                          "detail": "%s.%s" % (server_id, tool_name)})
+        return self._call_one(provider, model_name, prompt, label,
+                              temperature,
+                              max_tokens=(min(max_tokens or 1200, 2000)))
+
+    def answer_via_mcp_auto(self, question, servers, model=None,
+                            temperature=None, max_tokens=None,
+                            tool_defaults=None, history=None):
+        """Автовыбор MCP-сервера и инструмента по запросу.
+
+        servers — [{id, label, tools:[...]}]. Модель получает инструменты
+        всех серверов и возвращает {server, tool, arguments}; затем вызывается
+        инструмент ИМЕННО выбранного сервера.
+        """
+        from . import mcp_client
+
+        trace = []
+        question = str(question or "").strip()
+        trace.append({"kind": "enter",
+                      "title": "Агент: автовыбор MCP-сервера"})
+        if not question:
+            return Ok(self).value(ok=False, error="Пустой вопрос.", trace=trace)
+        valid = {str(s.get("id")): s for s in (servers or [])
+                 if s.get("id") and (s.get("tools") or [])}
+        if not valid:
+            return Ok(self).value(
+                ok=False, trace=trace,
+                error="Нет доступных MCP-серверов с инструментами.")
+
+        provider, model_name = self._resolve_model(model)
+        label = str(model or "").strip() or model_name
+        mt = self._coerce_max_tokens(max_tokens)
+        temp = self._coerce_temperature(temperature)
+        messages = [
+            {"role": "system", "content": self.mcp_select_system_prompt_multi(
+                list(valid.values()))},
+        ]
+        messages += self._mcp_history_messages(history)
+        messages.append({"role": "user", "content": question})
+        trace.append({"kind": "llm", "model": label,
+                      "title": "LLM: выбор MCP-сервера и инструмента",
+                      "detail": "серверов: %d" % len(valid)})
+        single = self._call_one(provider, model_name, messages, label, temp,
+                                max_tokens=mt)
+        input_total = single["prompt_tokens"]
+        output_total = single["completion_tokens"]
+        usage = {"input": input_total, "output": output_total,
+                 "total": input_total + output_total, "history": 0}
+        if not single["ok"]:
+            trace.append({"kind": "exit", "ok": False,
+                          "title": "Стоп: модель недоступна",
+                          "detail": single.get("error") or ""})
+            return Ok(self).value(
+                ok=False, trace=trace, usage=usage,
+                error=single.get("error") or "Модель выбора MCP недоступна.")
+
+        decision = self._parse_mcp_decision(single["content"]) or {}
+        tool_name = str(decision.get("tool") or "").strip() or None
+        server_id = str(decision.get("server") or "").strip()
+        # Модель может вернуть "project.git_branch" одним именем.
+        if tool_name and "." in tool_name:
+            prefix, rest = tool_name.split(".", 1)
+            if prefix in valid:
+                server_id, tool_name = prefix, rest
+        if not tool_name:
+            direct = decision.get("answer") or single["content"]
+            html = self._mcp_answer_html(question, direct, tool_name=None,
+                                         formatted=True)
+            text = "%s:\n%s" % (label, direct)
+            trace.append({"kind": "exit", "ok": True,
+                          "title": "Готово: ответ модели (без MCP)"})
+            return Ok(self).value(
+                ok=True, html=html, text=text,
+                answers=[{"label": label, "model": label, "text": direct,
+                          "temperature": temperature, "input": input_total,
+                          "output": output_total,
+                          "cost": self._estimate_cost(
+                              provider, model_name, input_total,
+                              output_total)}],
+                meta=self._build_meta(
+                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                    input_total + output_total, True),
+                trace=trace, usage=usage,
+                memory_used={"working": 0, "longterm": 0},
+                mcp={"server": "", "tool": None, "arguments": {},
+                     "result": None})
+
+        # Проверяем, что инструмент действительно есть у выбранного сервера
+        # (модель может перепутать сервер для одноимённого list_files).
+        names = {sid: {t.get("name") for t in (srv.get("tools") or [])}
+                 for sid, srv in valid.items()}
+        if (server_id not in valid
+                or tool_name not in names.get(server_id, set())):
+            candidates = [sid for sid, srv_names in names.items()
+                          if tool_name in srv_names]
+            if len(candidates) == 1:
+                server_id = candidates[0]
+            elif tool_name == "list_files" and "files" in candidates:
+                # Одноимённый list_files есть у project и files: для обзора
+                # файлов проекта безопаснее файловый sandbox.
+                server_id = "files"
+            else:
+                err = ("модель не выбрала однозначный MCP-сервер для "
+                       "инструмента %r" % tool_name)
+                return Ok(self).value(ok=False, trace=trace, usage=usage,
+                                      error=err)
+        raw_args = decision.get("arguments") or {}
+        # Модель иногда выбирает search_files, хотя вопрос — о содержимом
+        # конкретного файла («какая модель используется в rtk_console»).
+        # Для такого запроса нужен read_file, иначе ответом станут только
+        # упоминания файла в README.
+        if (server_id == "files" and tool_name == "search_files"
+                and self._is_file_content_question(question)):
+            candidate = str(raw_args.get("query") or "").strip()
+            if self._looks_like_file_token(candidate):
+                tool_name = "read_file"
+                raw_args = {"path": candidate}
+                trace.append({"kind": "branch",
+                              "title": "MCP: search_files -> read_file",
+                              "detail": "вопрос о содержимом файла %r"
+                                        % candidate})
+        # «Прочитай файлы проекта» — это чтение содержимого, а не список имён.
+        if (server_id == "files" and tool_name == "list_files"
+                and self._is_read_files_question(question)):
+            renamed = {k: v for k, v in raw_args.items()
+                       if k in ("subdir", "ext", "limit", "max_chars", "root")}
+            renamed.setdefault("limit", 3)
+            raw_args = renamed
+            tool_name = "read_many_files"
+            trace.append({"kind": "branch",
+                          "title": "MCP: list_files -> read_many_files",
+                          "detail": "нужно содержимое нескольких файлов"})
+        # Если пользователь указал абсолютную папку в вопросе — она важнее
+        # папки RAG по умолчанию (иначе rtk_console ищется в родительском
+        # проекте, а не в указанном подкаталоге).
+        question_root = self._question_root(question)
+        if question_root:
+            if server_id == "files" and tool_name in FILES_TOOLS:
+                raw_args["root"] = question_root
+            elif server_id == "project" and tool_name in GIT_TOOLS:
+                raw_args["repo"] = question_root
+            trace.append({"kind": "branch",
+                          "title": "MCP: папка из вопроса",
+                          "detail": question_root})
+        args = apply_tool_defaults(tool_name, raw_args,
+                                   tool_defaults, server_id=server_id)
+        trace.append({"kind": "branch", "title": "MCP -> вызов инструмента",
+                      "detail": "%s.%s(%s)"
+                                % (server_id, tool_name, json_dumps_safe(args))})
+        call = mcp_client.mcp_call_tool(tool_name, args, server_id=server_id)
+        if not call.get("ok"):
+            err = call.get("error") or "инструмент вернул ошибку"
+            html = self._mcp_answer_html(question, "Ошибка MCP: %s" % err,
+                                         tool_name=tool_name, arguments=args,
+                                         error=True, server_id=server_id)
+            text = "%s:\nОшибка MCP: %s" % (label, err)
+            return Ok(self).value(
+                ok=False, html=html, text=text, trace=trace, error=err,
+                usage=usage,
+                mcp={"server": server_id, "tool": tool_name,
+                     "arguments": args, "result": call.get("text", "")})
+        raw_result = call.get("text", "")
+        result_text = raw_result
+        formatted = False
+        # Файловые инструменты возвращают JSON (read_file — весь текст).
+        # Не показываем его пользователю как ответ: модель кратко отвечает
+        # на вопрос по содержимому и оформляет ответ в Markdown.
+        if server_id == "files" and raw_result.lstrip().startswith("{"):
+            try:
+                data = json.loads(raw_result)
+            except Exception:
+                data = None
+            if isinstance(data, dict) and data.get("ok") is not False:
+                summary = self._mcp_summarize_result(
+                    question, server_id, tool_name, raw_result,
+                    provider, model_name, label, temp, mt, trace=trace)
+                summary_text = str(summary.get("content") or "").strip()
+                if summary.get("ok") and summary_text:
+                    result_text = summary_text
+                    input_total += int(summary.get("prompt_tokens") or 0)
+                    output_total += int(summary.get("completion_tokens") or 0)
+                    usage.update({
+                        "input": input_total, "output": output_total,
+                        "total": input_total + output_total, "history": 0})
+                    formatted = True
+                else:
+                    trace.append({
+                        "kind": "branch",
+                        "title": "MCP: оформление недоступно",
+                        "detail": summary.get("error") or "пустой ответ"})
+        html = self._mcp_answer_html(question, result_text,
+                                     tool_name=tool_name, arguments=args,
+                                     server_id=server_id, formatted=formatted)
+        text = "%s (MCP: %s.%s):\n%s" % (label, server_id, tool_name,
+                                         result_text)
+        trace.append({"kind": "exit", "ok": True,
+                      "title": "Готово: ответ через MCP",
+                      "detail": "%s.%s" % (server_id, tool_name)})
+        return Ok(self).value(
+            ok=True, html=html, text=text,
+            answers=[{"label": label, "model": label, "text": text,
+                      "temperature": temperature, "input": input_total,
+                      "output": output_total,
+                      "cost": self._estimate_cost(
+                          provider, model_name, input_total, output_total),
+                      "mcp_server": server_id, "mcp_tool": tool_name}],
+            meta=self._build_meta(
+                datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                input_total + output_total, True),
+            trace=trace, usage=usage,
+            memory_used={"working": 0, "longterm": 0},
+            mcp={"server": server_id, "tool": tool_name, "arguments": args,
+                 "result": raw_result})
 
     def compose_message(self, report_text, model=None, fallback=""):
         """Формирует СООБЩЕНИЕ о запуске композиции MCP СИЛАМИ МОДЕЛИ.
@@ -920,14 +1307,17 @@ class Agent:
             if not isinstance(obj, dict):
                 return None
             tool = obj.get("tool") or obj.get("name") or obj.get("tool_name")
+            server = obj.get("server") or obj.get("mcp_server") or ""
             if tool:
                 args = (obj.get("arguments") or obj.get("args")
                         or obj.get("params") or {})
                 if not isinstance(args, dict):
                     args = {}
-                return {"tool": str(tool), "arguments": args}
+                return {"tool": str(tool), "arguments": args,
+                        "server": str(server or "").strip()}
             ans = obj.get("answer") or obj.get("text") or obj.get("response")
-            return {"tool": None, "answer": ("" if ans is None else str(ans))}
+            return {"tool": None, "answer": ("" if ans is None else str(ans)),
+                    "server": str(server or "").strip()}
 
         try:
             data = json.loads(s)
@@ -947,20 +1337,38 @@ class Agent:
 
     @staticmethod
     def _mcp_answer_html(question, result_text, tool_name=None,
-                         arguments=None, error=False):
-        """HTML-карточка ответа через MCP (инструмент + результат)."""
+                         arguments=None, error=False, server_id=None,
+                         formatted=False):
+        """HTML-карточка ответа через MCP (инструмент + результат).
+
+        formatted=True — result_text является ответом модели в Markdown,
+        его нужно отрендерить, а не показывать в <pre>.
+        """
         parts = ['<div class="mcp-answer%s">' %
                  (" mcp-answer-error" if error else "")]
         if tool_name:
             args = json_dumps_safe(arguments or {})
-            parts.append('<div class="mcp-answer-head">MCP-инструмент: '
-                         '<b>%s</b>(%s)</div>' % (html_report.escape_html(tool_name),
-                                                  html_report.escape_html(args)))
+            if server_id:
+                parts.append('<div class="mcp-answer-head">MCP-сервер: '
+                             '<b>%s</b> · инструмент: <b>%s</b>(%s)</div>'
+                             % (html_report.escape_html(str(server_id)),
+                                html_report.escape_html(tool_name),
+                                html_report.escape_html(args)))
+            else:
+                parts.append('<div class="mcp-answer-head">MCP-инструмент: '
+                             '<b>%s</b>(%s)</div>' % (html_report.escape_html(tool_name),
+                                                      html_report.escape_html(args)))
         else:
             parts.append('<div class="mcp-answer-head">Ответ модели '
                          '(инструмент не задействован)</div>')
-        parts.append('<div class="mcp-answer-body"><pre>%s</pre></div>'
-                     % html_report.escape_html(result_text or ""))
+        if formatted:
+            body, _counts = html_report.render_with_memory_counts(
+                result_text or "", highlight_quotes=False)
+            parts.append('<div class="mcp-answer-body mcp-answer-formatted">'
+                         '%s</div>' % body)
+        else:
+            parts.append('<div class="mcp-answer-body"><pre>%s</pre></div>'
+                         % html_report.escape_html(result_text or ""))
         parts.append("</div>")
         return "".join(parts)
 

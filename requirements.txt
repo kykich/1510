@@ -6,26 +6,14 @@
 #
 # Внешняя зависимость — пакет \mcp\ (Model Context Protocol): нужен ТОЛЬКО
 # для MCP-слоя (подключение к MCP-серверу, list_tools/call_tool, см.
-# rtk_app/mcp_client.py, client.py, yandex_calendar_server.py). Зависимость
-# ОПЦИОНАЛЬНАЯ: веб-сервер запускается и без неё — тогда статус MCP в
-# интерфейсе будет «недоступен (не установлен пакет mcp)».
+# rtk_app/mcp_client.py, client.py, project_server.py, support_server.py,
+# files_server.py). Зависимость ОПЦИОНАЛЬНАЯ: веб-сервер запускается и без
+# неё — тогда статус MCP в интерфейсе будет «недоступен (не установлен mcp)».
 #
 # Требуется Python >= 3.9 (для пакета mcp).
 #
 # Установка:  pip install -r requirements.txt
 mcp
-
-
-caldav
-# \caldav\ (+ его зависимость \icalendar\) нужны для MCP-сервера
-# Яндекс.Календаря (yandex_calendar_server.py: list_events/create_event/…).
-# Без них импорт падает: No module named 'caldav'.
-icalendar
-#
-# MCP-сервер «Время» (currency_server.py) дополнительных зависимостей НЕ
-# требует: значение берётся из локального времени (datetime), внешних вызовов
-# нет. Того же требуют MCP-серверы «Погода» (weather_server.py, OpenWeatherMap)
-# и «Замполит» (zampolit_server.py): только стандартный urllib.
 
 pypdf
 # \pypdf\ нужен ТОЛЬКО для RAG-слоя (rtk_app/rag.py): извлечение ТЕКСТОВОГО

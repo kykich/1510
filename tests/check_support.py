@@ -346,7 +346,6 @@ def test_chat_support_command():
     original_enabled = web_server._ServerState.mcp_enabled
     original_server = web_server._ServerState.mcp_server
     original_composition = web_server._ServerState.composition_running
-    original_reminders = web_server._collect_due_reminders
     original_local = web_server._running_local_label
     original_rag = web_server.support_rag_context
 
@@ -369,7 +368,6 @@ def test_chat_support_command():
     web_server._ServerState.mcp_server = ""
     web_server._ServerState.composition_running = False
     web_server.mcp_client = None          # без запуска MCP-подпроцесса
-    web_server._collect_due_reminders = lambda: []
     web_server._running_local_label = lambda: ""
 
     class FakeRagStore(object):
@@ -438,7 +436,6 @@ def test_chat_support_command():
         web_server._ServerState.mcp_enabled = original_enabled
         web_server._ServerState.mcp_server = original_server
         web_server._ServerState.composition_running = original_composition
-        web_server._collect_due_reminders = original_reminders
         web_server._running_local_label = original_local
         web_server.support_rag_context = original_rag
 

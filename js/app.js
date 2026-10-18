@@ -1644,16 +1644,16 @@ import { apiGet, apiPost } from "./core/api.js";
         // В этих случаях выбранная сверху модель/персона НЕ требуются.
         // ВАЖНО: сам ВЫБОР сервера в списке (без чекбокса и без композиции)
         // MCP-режим НЕ включает.
-        var doskaSelected = !!(mcpState && mcpState.server === DOSKA_SERVER);
-        var compositionActive = !!(mcpState && mcpState.composition);
-        var mcpReady = compositionActive || doskaSelected ||
-            !!(mcpState && mcpState.enabled && (mcpState.model || mcpState.available));
-        // КОМАНДА /help (ассистент разработчика) и /review (AI-ревью PR)
-        // работают без выбранной модели/персоны: сервер вернёт либо
-        // детерминированную справку, либо понятную ошибку/ревью.
+        var mcpReady = !!(mcpState && mcpState.enabled &&
+            (mcpState.model || mcpState.available));
+        // КОМАНДЫ /help, /review и /files работают без обязательной модели:
+        // сервер сам вернёт справку, понятную ошибку или результат поиска.
+        // Для /files docs|new сервер отдельно проверит наличие модели.
         var isHelp = /^\s*\/help\b/i.test(question);
         var isReview = /^\s*\/review\b/i.test(question);
-        if (!isHelp && !isReview && !hasActiveProfile() && !hasSelectedModel() && !mcpReady) {
+        var isFiles = /^\s*\/files\b/i.test(question);
+        if (!isHelp && !isReview && !isFiles &&
+                !hasActiveProfile() && !hasSelectedModel() && !mcpReady) {
             setStatus("Выберите модель или создайте персону.", "error");
             return;
         }
@@ -1692,10 +1692,11 @@ import { apiGet, apiPost } from "./core/api.js";
                 });
             }
             if (!data.ok) {
-                // /review и /support: ошибка (нет изменений, тикет не найден)
-                // приходит с готовым текстом — показываем её карточкой в чате,
-                // а не только в строке статуса.
-                if ((data.review || data.support) && data.text) {
+                // /review, /support и /files: ошибка приходит с готовым
+                // текстом — показываем её карточкой в чате, а не только в
+                // строке статуса.
+                if ((data.review || data.support || data.files_task)
+                        && data.text) {
                     items.push({ role: "user", content: question });
                     items.push({ role: "assistant", content: data.text,
                                  html: data.html || "",
@@ -1703,7 +1704,9 @@ import { apiGet, apiPost } from "./core/api.js";
                     render();
                     setStatus(data.review
                         ? "Ревью не выполнено — причина в сообщении."
-                        : "Поддержка: причина в сообщении.", "error");
+                        : (data.files_task
+                            ? "Файлы: операция не выполнена — причина в сообщении."
+                            : "Поддержка: причина в сообщении."), "error");
                     return;
                 }
                 render();
@@ -1873,7 +1876,7 @@ import { apiGet, apiPost } from "./core/api.js";
 
     // id сервера «Доска»: запрос к нему обрабатывается MCP-путём
     // независимо от чекбокса «Использовать MCP» (см. docs/task5.md).
-    var DOSKA_SERVER = "doska";
+
 
     // Заполняет селект доступных MCP-серверов (демо / календарь).
     function fillMcpServerSelect(servers) {
