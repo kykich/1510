@@ -32,6 +32,9 @@ JSON-API:
                                отсутствие — параметр не применяется.
                                Общий max_tokens запроса — фолбэк для моделей
                                без собственного max_tokens.
+                               Команды в question: /help (RAG по проекту),
+                               /review (AI-ревью PR), /support (поддержка
+                               по тикету/пользователю + FAQ).
     POST /api/newchat       - начать новый разговор (очистить историю)
     POST /api/compact       - {enabled, keep} -> настройки сжатия (summary)
     POST /api/compact_summary - {keep} -> дописать вытесненное в summary
@@ -128,6 +131,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from rtk_app import config
 from rtk_app.agent import Agent
 from rtk_app import local_server
+from rtk_app import support as support_mod
 from rtk_app.session_store import SessionStore
 
 try:
@@ -162,6 +166,120 @@ def parse_help(question):
     if not match:
         return None
     return (match.group(1) or "").strip()
+
+
+# ----------------------------------------------------------------------
+# Команда /support (docs/Final_task.md, задача 3): поддержка пользователей
+# ----------------------------------------------------------------------
+# /support T-1001 Почему не работает авторизация?
+# /support ticket=T-1001 ...
+# /support user=anna@example.com ...
+# --no-rag — не подмешивать FAQ.
+_SUPPORT_RE = re.compile(r"^\s*/support\b(.*)$", re.IGNORECASE | re.DOTALL)
+
+
+def parse_support(question):
+    """Разбирает /support T-1001 [вопрос] и возвращает dict или None.
+
+    Возвращает {ticket_id, user_id, query, use_rag}. Тикет можно указать
+    первым токеном (T-1001, #T-1001, 1001) либо ticket=T-1001; пользователя —
+    user=email/id. Остальные токены — текст вопроса.
+    """
+    match = _SUPPORT_RE.match(str(question or ""))
+    if not match:
+        return None
+    ticket_id, user_id, use_rag = "", "", True
+    query_parts = []
+    for index, token in enumerate((match.group(1) or "").split()):
+        low = token.lower()
+        if low in ("--no-rag", "no-rag"):
+            use_rag = False
+        elif low.startswith("ticket="):
+            ticket_id = token.split("=", 1)[1].strip()
+        elif low.startswith("user="):
+            user_id = token.split("=", 1)[1].strip()
+        elif (not ticket_id
+              and re.fullmatch(r"#?T-\d+", token, re.IGNORECASE)):
+            ticket_id = token
+        elif (not ticket_id and index == 0
+              and re.fullmatch(r"#?\d{3,}", token)):
+            # Числом тикет задаётся ТОЛЬКО первым токеном: иначе код ошибки
+            # («401») в вопросе был бы принят за ID обращения.
+            ticket_id = token
+        else:
+            query_parts.append(token)
+    return {"ticket_id": ticket_id, "user_id": user_id,
+            "query": " ".join(query_parts).strip(), "use_rag": use_rag}
+
+
+def support_lookup(ticket_id="", user_id="", query="", use_mcp=True,
+                   timeout=None):
+    """Данные тикета/пользователя для /support.
+
+    Сначала вызывается MCP-инструмент ``get_support_context`` сервера
+    «Поддержка» (JSON-тикеты/пользователи как CRM). Если MCP недоступен или
+    вернул ошибку — читаем те же JSON напрямую (fallback), чтобы команда
+    работала даже без установленного пакета ``mcp``.
+
+    Возвращает dict {ok, ticket, user, text, rag_query, source, error}, где
+    source — "mcp" | "json" | "none" (общий вопрос о продукте без обращения).
+    """
+    tid = str(ticket_id or "").strip()
+    uid = str(user_id or "").strip()
+    text_query = str(query or "").strip()
+    if not tid and not uid:
+        # Общий вопрос о продукте: данных обращения нет, FAQ ищется по тексту.
+        return {"ok": True, "ticket": None, "user": None, "text": "",
+                "rag_query": support_mod.build_rag_query(text_query),
+                "source": "none", "error": None}
+    if use_mcp and mcp_client is not None:
+        try:
+            result = mcp_client.mcp_call_tool(
+                "get_support_context",
+                {"ticket_id": tid, "user_id": uid, "query": text_query},
+                timeout=timeout,
+                server_id=getattr(config, "SUPPORT_SERVER_ID", "support"))
+            if result.get("ok"):
+                data = json.loads(result.get("text") or "{}")
+                if isinstance(data, dict) and data.get("ok"):
+                    data["source"] = "mcp"
+                    return data
+                print("[SUPPORT] MCP вернул ошибку: %s"
+                      % ((data or {}).get("error")
+                         if isinstance(data, dict) else data), flush=True)
+            else:
+                print("[SUPPORT] MCP недоступен: %s"
+                      % result.get("error"), flush=True)
+        except Exception as exc:                 # noqa: BLE001
+            print("[SUPPORT] MCP-вызов не выполнен: %s" % exc, flush=True)
+    try:
+        context = support_mod.resolve_context(
+            ticket_id=tid, user_id=uid, query=text_query, allow_empty=True)
+        context["source"] = "json"
+        return context
+    except Exception as exc:                     # noqa: BLE001
+        return {"ok": False, "ticket": None, "user": None, "text": "",
+                "rag_query": support_mod.build_rag_query(text_query),
+                "source": "json", "error": str(exc)}
+
+
+def support_rag_context(rag, query, top_k=None, docs_dir=None):
+    """RAG-контекст по FAQ/документации поддержки.
+
+    Поиск ограничен папкой ``SUPPORT_DOCS_DIR`` (docs/support), поэтому FAQ
+    не смешивается с кодом и документацией других проектов в общем индексе.
+    Возвращает (context_text, hits); ошибки поиска не ломают ответ.
+    """
+    target = os.path.abspath(str(docs_dir or support_mod.docs_dir()))
+    try:
+        if not rag.status().get("available"):
+            return "", []
+        return rag.build_context(
+            query, top_k=(top_k or getattr(config, "SUPPORT_TOP_K", 5)),
+            docs_dir=target)
+    except Exception as exc:                     # noqa: BLE001
+        print("[SUPPORT] RAG-поиск по FAQ не выполнен: %s" % exc, flush=True)
+        return "", []
 
 
 # ----------------------------------------------------------------------
@@ -952,8 +1070,27 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         full = os.path.realpath(os.path.join(root_real, os.path.normpath(rel)))
         if not (full.startswith(root_real + os.sep) or full == root_real):
             return self._send_bytes(403, "Forbidden", "text/plain")
+        # Данные поддержки (users.json/tickets.json) не отдаём через /docs/:
+        # даже если папка лежит внутри RAG-корня, это персональные данные.
+        try:
+            support_data_root = os.path.realpath(support_mod.data_dir())
+            if (full == support_data_root
+                    or full.startswith(support_data_root + os.sep)):
+                return self._send_bytes(403, "Forbidden", "text/plain")
+        except Exception:                        # noqa: BLE001
+            pass
         if not os.path.isfile(full):
-            return self._send_bytes(404, "Not Found", "text/plain")
+            # FAQ поддержки может лежать ВНЕ папки RAG-индекса (docs/support
+            # при docs_dir=docs_rag): ищем файл по имени в каталоге поддержки,
+            # не выходя за его пределы.
+            support_root = os.path.realpath(support_mod.docs_dir())
+            cand = os.path.realpath(os.path.join(
+                support_root, os.path.basename(os.path.normpath(rel))))
+            if ((cand.startswith(support_root + os.sep) or cand == support_root)
+                    and os.path.isfile(cand)):
+                full = cand
+            else:
+                return self._send_bytes(404, "Not Found", "text/plain")
         ctype, _ = mimetypes.guess_type(full)
         # Текстовые источники (README.md, docs/*.md, исходники проекта)
         # отдаём как text/plain с UTF-8: браузер покажет содержимое, а не
@@ -1185,6 +1322,11 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         review_spec = parse_review(question)
         is_review = review_spec is not None
 
+        # КОМАНДА /support (docs/Final_task.md, задача 3): ответ поддержки
+        # с учётом тикета/пользователя (MCP support) и FAQ (RAG).
+        support_spec = parse_support(question)
+        is_support = support_spec is not None
+
         # «ДОСКА» — особый сервер ВЫВОДА: запрос к ней обрабатывается через
         # MCP-путь (с предварительным обновлением данных композицией) и
         # НЕЗАВИСИМО от чекбокса «Использовать MCP». Для «Доски» применяется
@@ -1209,7 +1351,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         # ВАЖНО: /help и /review — ЯВНЫЕ команды. Они не должны
         # перехватываться MCP-режимом, «Доской» или композицией: иначе вместо
         # справки/ревью вернётся таблица MCP-сервера.
-        if is_help or is_review:
+        if is_help or is_review or is_support:
             via_mcp = False
 
         # РЕЖИМ ОТВЕТА зависит от наличия персон:
@@ -1249,7 +1391,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                     selected = [{"label": local_label}]
                     print("[LOCAL] по умолчанию используется %r (%s)"
                           % (local_label, "запущена"), flush=True)
-            if selected is None and not via_mcp and not is_help and not is_review:
+            if (selected is None and not via_mcp and not is_help
+                    and not is_review):
                 return self._send_json(200, {
                     "ok": False,
                     "error": "Не выбрана ни одна модель. Включите модель для "
@@ -1279,6 +1422,40 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                      model_label), flush=True)
             return self._send_json(200, self._review_payload(
                 review_spec, model_label, repo_dir))
+
+        # /support: данные тикета/пользователя (MCP-сервер «Поддержка»,
+        # fallback — JSON напрямую). Контекст обращения добавляется в системный
+        # промпт ОТДЕЛЬНО от RAG-контекста FAQ поддержки.
+        support_context_block = ""
+        support_state = None
+        if is_support:
+            support_state = support_lookup(
+                ticket_id=support_spec.get("ticket_id", ""),
+                user_id=support_spec.get("user_id", ""),
+                query=support_spec.get("query", ""))
+            if not support_state.get("ok"):
+                error = (support_state.get("error")
+                         or "обращение не найдено")
+                text = ("## Поддержка\n\n_Не удалось получить данные "
+                        "обращения: %s_" % error)
+                print("[SUPPORT] данные обращения не получены: %s" % error,
+                      flush=True)
+                return self._send_json(200, {
+                    "ok": False, "support": True, "error": error,
+                    "text": text, "html": "", "answers": [],
+                    "support_source": support_state.get("source"),
+                })
+            ticket = support_state.get("ticket") or {}
+            user = support_state.get("user") or {}
+            # Вопрос для модели: текст после /support, иначе тема тикета.
+            question = (support_spec.get("query")
+                        or ticket.get("subject")
+                        or "Помоги ответить пользователю по обращению.")
+            support_context_block = support_mod.build_support_system_context(
+                ticket, user)
+            print("[SUPPORT] source=%s ticket=%r user=%r query=%r"
+                  % (support_state.get("source"), ticket.get("id"),
+                     user.get("id"), question), flush=True)
 
         # Глобальное ограничение max_tokens (None — не применяется)
         max_tokens = data.get("max_tokens")
@@ -1354,7 +1531,7 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         rag_queries = None            # формулировки запроса (rewrite)
         rag_rerank_fn = None          # callback LLM-реранкера
         help_git_note = ""            # сведения о git для /help
-        if rag_set.get("enabled") and not is_help:
+        if rag_set.get("enabled") and not is_help and not is_support:
             # Query rewrite: расширяем запрос синонимами/терминами через LLM.
             if rag_set.get("rewrite") and self.agent is not None:
                 try:
@@ -1387,6 +1564,22 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             if help_git_note:
                 rag_context = ("СВЕДЕНИЯ О ПРОЕКТЕ (git):\n" + help_git_note
                                + ("\n\n" + rag_context if rag_context else ""))
+        elif is_support:
+            # /support: RAG по FAQ/документации продукта (docs/support).
+            # Поиск выполняется ВСЕГДА при use_rag=True, даже если общий RAG
+            # выключен, — команда должна опираться на базу знаний поддержки.
+            rag_context, rag_hits = "", []
+            if support_spec.get("use_rag", True):
+                rag_query = ((support_state or {}).get("rag_query")
+                             or question)
+                rag_context, rag_hits = support_rag_context(
+                    self.session.rag, rag_query,
+                    top_k=getattr(config, "SUPPORT_TOP_K", 5),
+                    docs_dir=support_mod.docs_dir())
+                print("[SUPPORT] RAG по FAQ: запрос=%r, фрагментов=%d"
+                      % (rag_query, len(rag_hits)), flush=True)
+            else:
+                print("[SUPPORT] RAG по FAQ отключён (--no-rag)", flush=True)
         else:
             rag_context, rag_hits = self.session.rag_context(
                 question, queries=rag_queries, rerank_fn=rag_rerank_fn)
@@ -1401,7 +1594,8 @@ class WebRequestHandler(BaseHTTPRequestHandler):
         except Exception:                        # noqa: BLE001
             rag_index_ok = False
         rag_low_relevance = (bool(rag_set.get("enabled")) and rag_index_ok
-                             and not rag_hits and not is_help)
+                             and not rag_hits and not is_help
+                             and not is_support)
         rag_sources = []
         # Фрагменты для карточки ответа: текст найденного чанка + картинки
         # соответствующей страницы (если из PDF извлечены изображения).
@@ -1415,8 +1609,12 @@ class WebRequestHandler(BaseHTTPRequestHandler):
             # Уникальные источники (документ + страницы) для карточки ответа.
             try:
                 from rtk_app import rag as rag_mod
-                rag_sources = rag_mod.format_sources(rag_hits,
-                                                     docs_dir=rag_docs_dir)
+                # Для /support источники — файлы FAQ (docs/support); сервер
+                # отдаёт их через /docs/ с fallback на каталог поддержки.
+                source_docs_dir = (support_mod.docs_dir() if is_support
+                                   else rag_docs_dir)
+                rag_sources = rag_mod.format_sources(
+                    rag_hits, docs_dir=source_docs_dir)
                 if rag_sources:
                     print("[RAG] источников для карточки ответа: %d"
                           % len(rag_sources), flush=True)
@@ -1521,18 +1719,33 @@ class WebRequestHandler(BaseHTTPRequestHandler):
                 server_id=(_ServerState.mcp_server or None),
                 tool_defaults=tool_defaults)
         else:
+            answer_kwargs = {
+                "max_tokens": max_tokens,
+                "compact": compact,
+                "memory": memory,
+                "profile": profile,
+                "answer_title": answer_title,
+                "task_state": task_state,
+                "invariants": invariants,
+                "rag_context": (rag_context or None),
+                "rag_sources": (rag_sources or None),
+                "rag_fragments": (rag_fragments or None),
+                "rag_low_relevance": rag_low_relevance,
+            }
+            if support_context_block:
+                answer_kwargs["support_context"] = support_context_block
             result = self.agent.answer(question, history, selected,
-                                       max_tokens=max_tokens,
-                                       compact=compact,
-                                       memory=memory,
-                                       profile=profile,
-                                       answer_title=answer_title,
-                                       task_state=task_state,
-                                       invariants=invariants,
-                                                                              rag_context=(rag_context or None),
-                                       rag_sources=(rag_sources or None),
-                                       rag_fragments=(rag_fragments or None),
-                                       rag_low_relevance=rag_low_relevance)
+                                       **answer_kwargs)
+        if is_support and isinstance(result, dict):
+            # Признак для UI: ответ дан в режиме поддержки; рядом — источник
+            # данных обращения (MCP/JSON) и использованные FAQ-фрагменты.
+            result["support"] = True
+            result["support_source"] = (support_state or {}).get("source")
+            result["ticket_id"] = (((support_state or {}).get("ticket")
+                                    or {}).get("id"))
+            result["user_id"] = (((support_state or {}).get("user")
+                                  or {}).get("id"))
+            result["rag_used"] = bool(rag_context)
         if result.get("ok"):
             # По одному ходу на ответ модели с уже готовой разметкой
             self.session.append_turn(question, {

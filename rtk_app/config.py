@@ -198,9 +198,26 @@ MCP_SERVERS = [
     # git branch/status/diff и список файлов (только чтение, без записи).
     {"id": "project", "label": "Проект (git)",
      "args": ["project_server.py"]},
+    # --- Задача 3 (docs/Final_task.md): поддержка пользователей ---
+    # JSON-тикеты/пользователи; RAG по FAQ — docs/support.
+    {"id": "support", "label": "Поддержка (тикеты/CRM)",
+     "args": ["support_server.py"]},
 ]
 # MCP-сервер по умолчанию (id из MCP_SERVERS).
 MCP_SERVER_DEFAULT = "calendar"
+
+# --- ПОДДЕРЖКА ПОЛЬЗОВАТЕЛЕЙ (docs/Final_task.md, задача 3) ---
+# JSON с вымышленными пользователями/тикетами. Для реальных данных задайте
+# SUPPORT_DATA_DIR на папку ВНЕ репозитория (или переменную окружения).
+SUPPORT_DATA_DIR = os.path.join(BASE_DIR, "support_data")
+# FAQ и документация продукта, по которым работает RAG поддержки.
+SUPPORT_DOCS_DIR = os.path.join(BASE_DIR, "docs", "support")
+# id MCP-сервера поддержки (см. MCP_SERVERS).
+SUPPORT_SERVER_ID = "support"
+# Сколько фрагментов FAQ подмешивать в ответ.
+SUPPORT_TOP_K = 5
+# Максимальный размер блока контекста тикета/пользователя.
+SUPPORT_CONTEXT_CHARS = 6000
 
 # --- КОМПОЗИЦИЯ MCP (см. docs/task5.md) ---
 # Пайплайн из нескольких MCP-серверов:
@@ -321,9 +338,11 @@ RAG_DOC_EXTS = (
 # случайной индексации гигантских логов/дампов.
 RAG_DOC_MAX_MB = 2
 # Папки, которые НЕ индексируются при обходе (служебные/бинарные/сессии).
+# support_data/ — персональные данные тикетов/пользователей: в общий RAG они
+# не попадают, для поддержки используется только FAQ (docs/support).
 RAG_DOC_SKIP_DIRS = (
     ".git", ".idea", ".vscode", ".venv", "venv", "env",
-    "node_modules", "__pycache__", "session", "rag_images",
+    "node_modules", "__pycache__", "session", "rag_images", "support_data",
 )
 # Файлы с СЕКРЕТАМИ: никогда не индексируются (ключи API лежат в корне
 # проекта и не должны попадать в базу знаний/ответы модели).

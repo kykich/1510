@@ -462,6 +462,54 @@ python review_pr.py --base HEAD~1 --head HEAD \
 Проверка на четырёх версиях проекта (ветки `v1009`/`v1210`/`v2309`/`v3108`) —
 `docs/VERIFY_versions.md`.
 
+## Поддержка пользователей (`docs/Final_task.md`, задача 3)
+
+Мини-сервис поддержки: ассистент отвечает на вопросы о продукте, опирается на
+FAQ (RAG) и учитывает данные тикета/пользователя из JSON-«CRM». Тикеты
+подключены через MCP-сервер «Поддержка»; если MCP недоступен, команда читает
+те же JSON напрямую.
+
+**Данные (вымышленные):** `support_data/users.json`, `support_data/tickets.json`
+(3 пользователя, 4 тикета; демо `T-1001` — ошибка `401` после смены пароля).
+Для реальных данных задайте `SUPPORT_DATA_DIR` на папку вне репозитория.
+Каталог `support_data/` исключён из общего RAG (`RAG_DOC_SKIP_DIRS`): тикеты и
+пользователи не попадают в ответы обычного чата.
+
+**FAQ для RAG:** `docs/support/FAQ.md`, `docs/support/product.md`. Индексация
+(нужна Ollama с `nomic-embed-text-v2-moe`):
+
+```bash
+python support_index.py
+```
+
+Поиск `/support` ограничен `docs/support` — FAQ не смешивается с кодом и
+документацией других проектов в общем индексе.
+
+**В чате:**
+
+```text
+/support T-1001 Почему не работает авторизация?
+/support ticket=T-1001 --no-rag что проверить?
+/support user=anna@example.com какие мои обращения?
+/support Как сбросить пароль?          # общий вопрос о продукте
+```
+
+- `T-1001` / `#T-1001` / `1001` в начале — ID тикета; `ticket=` и `user=` —
+  явные параметры; `--no-rag` отключает поиск по FAQ.
+- Контекст тикета (описание, код ошибки, что уже пробовал пользователь, история
+  обращения) и карточка пользователя (тариф, статус, 2FA) добавляются в
+  системный промпт отдельно от RAG-контекста.
+- Без `ticket=`/`user=` команда отвечает как общая справка по продукту.
+- Ответ — Markdown с разделами `## Краткий ответ`, `## Почему так`,
+  `## Что сделать`, `## Когда эскалировать`; в карточке — «Источники» (FAQ).
+- MCP-сервер `support_server.py` (id `support` в `config.MCP_SERVERS`) отдаёт
+  `ping`, `find_user`, `get_ticket`, `list_tickets`, `get_support_context`,
+  `stats`; все инструменты только читают данные.
+
+Тест: `python -m tests.check_support` — **106 OK, 0 FAIL**. Пошаговая
+проверка — `docs/VERIFY_task3.md`, трассировка —
+`docs/REPORT_task8_traceability.md`.
+
 ## Структура проекта
 
 ```
@@ -477,6 +525,9 @@ python review_pr.py --base HEAD~1 --head HEAD \
 ├── zavhoz_server.py     # MCP-сервер «Завхоз» (сохранение пар в JSON)
 ├── doska_server.py      # MCP-сервер «Доска» (таблица событие ↔ время)
 ├── project_server.py    # MCP-сервер «Проект» (git branch/status/diff, файлы)
+├── support_server.py    # MCP-сервер «Поддержка» (JSON-тикеты/CRM, только чтение)
+├── support_index.py     # индексация FAQ поддержки (docs/support) в RAG
+├── support_data/        # вымышленные users.json / tickets.json для задачи 3
 ├── review_pr.py         # CLI AI-ревью PR: diff + RAG -> review.md
 ├── .github/
 │   └── workflows/
@@ -490,6 +541,7 @@ python review_pr.py --base HEAD~1 --head HEAD \
 │   ├── agent.py         # АГЕНТ: отдельная сущность, вся логика запросов к LLM
 │   ├── rag.py           # RAG: индексация PDF/docs/кода, гибридный поиск, порог
 │   ├── pr_review.py     # AI-ревью PR: diff -> RAG -> модель -> Markdown
+│   ├── support.py       # поддержка: JSON-тикеты, контекст пользователя, промпт
 │   ├── rag_llm.py       # RAG: LLM-части 2-го этапа (query rewrite, реранкер)
 │   ├── local_server.py  # ЛОКАЛЬНАЯ модель: скан папки, автоподбор и запуск llama-server
 │   ├── local_llm.py     # ЛОКАЛЬНАЯ модель: клиент OpenAI-совместимого /v1
@@ -514,7 +566,10 @@ python review_pr.py --base HEAD~1 --head HEAD \
 │   ├── Final_task.md    # итоговое ТЗ (4 задачи: RAG+/help, PR-ревью, поддержка, файлы)
 │   ├── REPORT_task6_traceability.md # трассировка Final_task (задача 1) → код → тест
 │   ├── REPORT_task7_traceability.md # трассировка Final_task (задача 2, PR-ревью) → код → тест
+│   ├── REPORT_task8_traceability.md # трассировка Final_task (задача 3, поддержка) → код → тест
+│   ├── support/         # FAQ.md и product.md — база знаний поддержки (RAG)
 │   ├── VERIFY_task2.md  # пошаговая проверка AI-ревью PR (тесты, CLI, RAG, Action)
+│   ├── VERIFY_task3.md  # пошаговая проверка поддержки (тикеты, MCP, FAQ/RAG)
 │   ├── VERIFY_versions.md # проверка RAG, /help и /review на 4 версиях
 │   ├── session-handoff.md # передача состояния: сделано/проверено/следующие шаги
 │   └── REPORT_task_traceability.md  # трассировка требований ТЗ → код → тест
@@ -545,6 +600,7 @@ python tests/check_rag_rank.py          # улучшенный RAG (гибрид
 python tests/check_rag_citations.py     # источник/chunk_id, жёлтые цитаты, «не знаю»
 python tests/check_project_help.py      # RAG по docs/коду, git-инструменты, /help
 python tests/check_pr_review.py         # AI-ревью PR: diff, RAG, промпт, формат
+python tests/check_support.py           # поддержка: тикеты, MCP, FAQ/RAG, /support
 ```
 
 Каждый тест печатает `[OK]`/`[FAIL]` по проверкам и строку

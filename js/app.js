@@ -1692,16 +1692,18 @@ import { apiGet, apiPost } from "./core/api.js";
                 });
             }
             if (!data.ok) {
-                // /review: ошибка (нет изменений, нет модели) приходит с
-                // готовым текстом — показываем её карточкой в чате, а не
-                // только в строке статуса.
-                if (data.review && data.text) {
+                // /review и /support: ошибка (нет изменений, тикет не найден)
+                // приходит с готовым текстом — показываем её карточкой в чате,
+                // а не только в строке статуса.
+                if ((data.review || data.support) && data.text) {
                     items.push({ role: "user", content: question });
                     items.push({ role: "assistant", content: data.text,
                                  html: data.html || "",
                                  answers: data.answers || [] });
                     render();
-                    setStatus("Ревью не выполнено — причина в сообщении.", "error");
+                    setStatus(data.review
+                        ? "Ревью не выполнено — причина в сообщении."
+                        : "Поддержка: причина в сообщении.", "error");
                     return;
                 }
                 render();

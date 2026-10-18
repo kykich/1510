@@ -1,0 +1,43 @@
+{
+  "users": [
+    {
+      "id": "u-1001",
+      "name": "Анна Петрова",
+      "email": "anna@example.com",
+      "phone": "+7 999 100-10-01",
+      "plan": "pro",
+      "status": "active",
+      "locale": "ru",
+      "created_at": "2026-01-15",
+      "two_factor": true,
+      "last_seen": "2026-10-18 09:40",
+      "notes": "Тестовый пользователь; данные вымышленные."
+    },
+    {
+      "id": "u-1002",
+      "name": "Иван Соколов",
+      "email": "ivan@example.com",
+      "phone": "+7 999 100-10-02",
+      "plan": "basic",
+      "status": "active",
+      "locale": "ru",
+      "created_at": "2026-03-02",
+      "two_factor": false,
+      "last_seen": "2026-10-17 18:20",
+      "notes": "Тестовый пользователь; данные вымышленные."
+    },
+    {
+      "id": "u-1003",
+      "name": "Мария Орлова",
+      "email": "maria@example.com",
+      "phone": "+7 999 100-10-03",
+      "plan": "team",
+      "status": "active",
+      "locale": "ru",
+      "created_at": "2026-05-11",
+      "two_factor": true,
+      "last_seen": "2026-10-18 08:05",
+      "notes": "Тестовый пользователь; данные вымышленные."
+    }
+  ]
+}

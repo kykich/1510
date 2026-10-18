@@ -351,7 +351,7 @@ class Agent:
                compact=None, memory=None, profile=None, answer_title=None,
                task_state=None, invariants=None, rag_context=None,
                rag_sources=None, rag_fragments=None,
-               rag_low_relevance=False):
+               rag_low_relevance=False, support_context=None):
         """Обрабатывает запрос пользователя и возвращает результат.
 
         Принимает:
@@ -404,6 +404,10 @@ class Agent:
                       Если задан, под ответом выводится блок «Фрагмент
                       документа»: текст найденного фрагмента + картинки
                       его страницы (связка текст + картинка в RAG).
+            support_context — строка системного блока поддержки (инструкция
+                      ассистенту + данные тикета/пользователя) или None.
+                      Добавляется в системный промпт отдельно от RAG-контекста
+                      FAQ (docs/Final_task.md, задача 3).
         Возвращает dict, единообразный для успеха и ошибок:
             ok      — True, если хотя бы одна модель ответила;
             text    — текстовое представление ответов;
@@ -468,7 +472,8 @@ class Agent:
         messages = self._build_messages(history, question, profile=profile,
                                         task_state=task_state,
                                         invariants=invariants,
-                                        rag_context=rag_context)
+                                        rag_context=rag_context,
+                                        support_context=support_context)
         hlen = len(history) if isinstance(history, list) else 0
         prof_note = ""
         if isinstance(profile, dict) and (profile.get("character")
@@ -1375,7 +1380,8 @@ class Agent:
         return parse_facts_json(content), content
 
     def _build_messages(self, history, question, profile=None, task_state=None,
-                        invariants=None, rag_context=None):
+                        invariants=None, rag_context=None,
+                        support_context=None):
         """Собирает полный список сообщений для API (системный промпт + диалог).
 
         ВАЖНО: из истории сохраняются НЕ только user/assistant, но и
@@ -1411,6 +1417,11 @@ class Agent:
         inv_prompt = self.invariants_system_prompt(invariants)
         if inv_prompt:
             system_parts.append(inv_prompt)
+        # ПОДДЕРЖКА (задача 3): инструкция ассистенту поддержки + данные
+        # тикета/пользователя. Передаётся отдельно от RAG-контекста FAQ.
+        support_block = str(support_context or "").strip()
+        if support_block:
+            system_parts.append(support_block)
         # RAG (Retrieval-Augmented Generation): контекст из PDF-документов.
         # Режим A2 — контекст найден ЗАРАНЕЕ (вызывающей стороной) и здесь
         # подставляется в промпт; модель опирается на него при ответе.

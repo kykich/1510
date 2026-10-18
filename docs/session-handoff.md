@@ -1,9 +1,10 @@
 # Handoff: AI-ассистент разработчика (репозиторий `G:\9potok\1310`)
 
 **Дата:** 18.10.2026  
-**Тема:** задачи 1–2 из `docs/Final_task.md` (RAG + `/help` + MCP «Проект»;
+**Тема:** задачи 1–3 из `docs/Final_task.md` (RAG + `/help` + MCP «Проект»;
 AI-ревью PR: diff + RAG → баги/архитектура/рекомендации, GitHub Action и
-команда `/review` в чате).
+команда `/review` в чате; поддержка пользователей: JSON-тикеты через MCP,
+контекст пользователя и FAQ/RAG, команда `/support`).
 
 Документ описывает состояние на момент передачи: что сделано, что проверено,
 что не закоммичено, какие есть риски и с чего продолжать в новой сессии.
@@ -21,7 +22,8 @@ AI-ревью PR: diff + RAG → баги/архитектура/рекомен�
 - RAG `rtk_app/rag.py`: индексация PDF/`docs`/кода в SQLite
   (`session/rag_index.db`), гибридный поиск (вектор + BM25), query rewrite;
 - MCP-серверы в корне: `project_server.py` («Проект»: git branch/status/diff,
-  список файлов, только чтение), `doska_server.py`, `zavhoz_server.py`,
+  список файлов, только чтение), `support_server.py` («Поддержка»: JSON-тикеты
+  и пользователи, только чтение), `doska_server.py`, `zavhoz_server.py`,
   `zampolit_server.py`, `weather_server.py`, `currency_server.py`,
   `yandex_calendar_server.py`;
 - локальная модель: `rtk_app/local_server.py` (запуск `llama-server` из UI,
@@ -35,7 +37,7 @@ AI-ревью PR: diff + RAG → баги/архитектура/рекомен�
 |---|---|---|
 | 1. RAG по README/`docs`/коду + MCP git + `/help` | **Готово**, закоммичено (`e8c8308`) | `docs/REPORT_task6_traceability.md`, README |
 | 2. AI-ревью PR (diff + RAG → 3 раздела, GitHub Action, `/review`) | **Готово**: код и документация на GitHub; workflow — локальный коммит над `origin/master`, ждёт `workflow`-scope PAT | `docs/REPORT_task7_traceability.md`, `docs/VERIFY_task2.md` |
-| 3. Мини-сервис поддержки (FAQ + тикеты + CRM/MCP) | **Не начато** | `docs/Final_task.md`, задача 3 |
+| 3. Мини-сервис поддержки (FAQ + тикеты + CRM/MCP) | **Готово**: код, данные, тесты (106 OK), документация и `/support` в чате | `docs/REPORT_task8_traceability.md`, `docs/VERIFY_task3.md` |
 | 4. Ассистент по файлам проекта (чтение/поиск/изменение) | **Не начато** | `docs/Final_task.md`, задача 4 |
 
 ### Задача 1 — что уже работает
@@ -115,6 +117,30 @@ AI-ревью PR: diff + RAG → баги/архитектура/рекомен�
 - Тестовый стенд версий: `test1310\versions.git` + worktree `1009/1210/2309/
   3108`, ветки `v1009`…`v3108` (см. `docs/VERIFY_versions.md`).
 
+### Задача 3 — что уже работает
+
+- `rtk_app/support.py`: загрузка `users.json`/`tickets.json`, поиск по
+  id/email/имени/телефону, поиск тикета (`T-1001`, `#T-1001`, `1001`), список
+  и последний открытый тикет, карточки пользователя/тикета, `build_context`,
+  `build_rag_query`, `SUPPORT_SYSTEM_PROMPT`, `resolve_context`.
+- `support_server.py` (MCP, id `support`): `ping`, `find_user`, `get_ticket`,
+  `list_tickets`, `get_support_context`, `stats`; только чтение JSON.
+- `support_data/`: вымышленные 3 пользователя и 4 тикета (демо `T-1001` —
+  401 после смены пароля, 2FA, старая вкладка). Реальные данные — через
+  `SUPPORT_DATA_DIR` вне репозитория.
+- `docs/support/FAQ.md`, `product.md` + `support_index.py`: FAQ индексируется
+  в общий RAG, поиск `/support` ограничен `docs/support`.
+- `web/server.py`: `parse_support`, `support_lookup` (MCP → fallback JSON),
+  `support_rag_context`, ветка `is_support` в `_handle_ask`; контекст тикета
+  и пользователя добавляется в системный промпт через `support_context`,
+  FAQ — отдельным RAG-блоком; ответ помечается `support=true`,
+  `support_source`, `ticket_id`, `rag_used`.
+- `js/app.js`: ошибки `/support` (тикет не найден) показываются карточкой в
+  чате, как у `/review`.
+- Тесты `tests/check_support.py`: **106 OK, 0 FAIL** (данные, поиск, контекст,
+  MCP-инструменты, индексатор, изоляция RAG, `/support`, fallback, агент,
+  HTTP-обработчик).
+
 ---
 
 ## 3. Git-состояние
@@ -131,7 +157,11 @@ r1210   https://github.com/kykich/1210.git
 ```
 
 Код (`6cc961c`), документация и handoff-коммиты отправлены в
-`origin/master`. Рабочее дерево чистое.
+`origin/master`. На момент передачи **не закоммичены** изменения задачи 3:
+`rtk_app/support.py`, `support_server.py`, `support_index.py`, `support_data/`,
+`docs/support/`, `tests/check_support.py`, `docs/REPORT_task8_traceability.md`,
+`docs/VERIFY_task3.md`, а также правки `web/server.py`, `js/app.js`,
+`rtk_app/agent.py`, `rtk_app/config.py`, `README.md` и этого handoff.
 
 Workflow-коммит (`.github/workflows/ai-review.yml`) **локальный**:
 HTTPS-токен без scope `workflow` не даёт GitHub создать workflow-файл.
@@ -206,6 +236,7 @@ python rtk_web.py 8123
 ```powershell
 python -m tests.check_pr_review     # 86 OK, 0 FAIL
 python -m tests.check_project_help  # 79 OK, 0 FAIL
+python -m tests.check_support       # 106 OK, 0 FAIL
 python -m tests.check_composition   # 63 OK, 0 FAIL
 python -m tests.check_server_context #  7 OK, 0 FAIL
 node --check js\app.js
@@ -221,6 +252,9 @@ node --check js\app.js
 /review                     # HEAD~1..HEAD, repo = docs_dir
 /review origin/master HEAD  # явные ревизии
 /review --no-rag            # без RAG
+/support T-1001 Почему не работает авторизация?
+/support user=anna@example.com какие мои обращения?
+/support Как сбросить пароль?
 ```
 
 Модель: выбранная в селекторе → модель персоны → запущенная локальная.
@@ -228,6 +262,8 @@ node --check js\app.js
 детерминированную справку. Если `base` и `head` совпадают (например,
 `/review origin/master`, когда `origin/master == HEAD`), вернётся ошибка
 «Нет изменений между …» с названием общего коммита — модель не вызывается.
+`/support` требует модель; контекст тикета/пользователя и FAQ подставляются
+автоматически (MCP `support`, fallback — JSON).
 
 ### CLI
 
@@ -337,11 +373,11 @@ python review_pr.py --repo G:\9potok\test1310\1210 `
    сравнение — `/review v1009 v1210` (см. `docs/VERIFY_versions.md`).
 4. **Почистить секреты** в `1210/docs/session-handoff.md`, при необходимости
    пересобрать индекс.
-5. **Задача 3** (поддержка пользователей): FAQ + RAG + MCP с тикетами/CRM,
-   учесть контекст пользователя.
-6. **Задача 4** (работа с файлами): MCP/tooling на чтение/поиск/изменение,
+5. **Задача 4** (работа с файлами): MCP/tooling на чтение/поиск/изменение,
    минимум 2 сценария (например, «найти использования API» и «обновить
    документацию»), воспроизводимость.
+6. Задача 3 (опционально): запись/обновление тикетов через MCP, подключение
+   реальной CRM вместо JSON, переиндексация FAQ из UI.
 7. Опционально: асинхронное ревью в чате, обновление существующего
    комментария PR вместо нового, очистка/пересборка индекса из UI.
 
@@ -381,12 +417,15 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'rtk_web\.p
 - `docs/Final_task.md` — исходное ТЗ (задачи 1–4).
 - `docs/REPORT_task6_traceability.md` — задача 1: RAG/`/help`/MCP, результаты.
 - `docs/REPORT_task7_traceability.md` — задача 2: требования → код → тесты.
+- `docs/REPORT_task8_traceability.md` — задача 3: поддержка, тикеты, MCP, FAQ.
 - `docs/VERIFY_task2.md` — как проверить задачу 2 (тесты, CLI, RAG, Local, CI,
   чат).
+- `docs/VERIFY_task3.md` — как проверить задачу 3 (тикеты, MCP, FAQ/RAG,
+  `/support`).
 - `docs/VERIFY_versions.md` — тестовый стенд из 4 версий: ветки, worktree,
   проверка RAG/`/help`/`/review`.
 - `README.md` — пользовательская документация: RAG, `/help`, AI-ревью,
-  `/review`, структура проекта.
+  `/review`, `/support`, структура проекта.
 - `docs/OPTIMIZATION_REVIEW.md` — замечания по архитектуре (не все внедрены).
 
 ---
