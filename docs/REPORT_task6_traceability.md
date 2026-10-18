@@ -7,8 +7,8 @@
 
 На момент составления отчёта реализована **задача 1**. Задачи 2–4 (AI-ревью PR,
 поддержка пользователей, ассистент по файлам) в этом объёме не
-рассматривались; задачи 2 и 3 описаны в `docs/REPORT_task7_traceability.md` и
-`docs/REPORT_task8_traceability.md`.
+рассматривались; задачи 2–4 описаны в `docs/REPORT_task7_traceability.md`,
+`docs/REPORT_task8_traceability.md` и `docs/REPORT_task9_traceability.md`.
 
 ## Требование → код → тест
 

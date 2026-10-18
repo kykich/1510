@@ -1,10 +1,11 @@
 # Handoff: AI-ассистент разработчика (репозиторий `G:\9potok\1310`)
 
 **Дата:** 18.10.2026  
-**Тема:** задачи 1–3 из `docs/Final_task.md` (RAG + `/help` + MCP «Проект»;
+**Тема:** задачи 1–4 из `docs/Final_task.md` (RAG + `/help` + MCP «Проект»;
 AI-ревью PR: diff + RAG → баги/архитектура/рекомендации, GitHub Action и
 команда `/review` в чате; поддержка пользователей: JSON-тикеты через MCP,
-контекст пользователя и FAQ/RAG, команда `/support`).
+контекст пользователя и FAQ/RAG, команда `/support`; работа с файлами:
+поиск/чтение/создание/изменение, команда `/files`).
 
 Документ описывает состояние на момент передачи: что сделано, что проверено,
 что не закоммичено, какие есть риски и с чего продолжать в новой сессии.
@@ -18,14 +19,14 @@ AI-ревью PR: diff + RAG → баги/архитектура/рекомен�
 - HTTP-сервер `rtk_web.py` → `web/server.py` (порт по умолчанию 8123),
   UI в `index.html` + `js/app.js` + `css/style.css`;
 - агент `rtk_app/agent.py`: выбор модели (DeepSeek / GigaChat / Local),
-  персоны, память, композиция, MCP;
+  персоны, память, MCP;
 - RAG `rtk_app/rag.py`: индексация PDF/`docs`/кода в SQLite
   (`session/rag_index.db`), гибридный поиск (вектор + BM25), query rewrite;
 - MCP-серверы в корне: `project_server.py` («Проект»: git branch/status/diff,
   список файлов, только чтение), `support_server.py` («Поддержка»: JSON-тикеты
-  и пользователи, только чтение), `doska_server.py`, `zavhoz_server.py`,
-  `zampolit_server.py`, `weather_server.py`, `currency_server.py`,
-  `yandex_calendar_server.py`;
+  и пользователи, только чтение), `files_server.py` («Файлы проекта»: чтение,
+  поиск, preview/apply). Календарь, «Время», «Погода», «Замполит», «Завхоз» и
+  «Доска» удалены;
 - локальная модель: `rtk_app/local_server.py` (запуск `llama-server` из UI,
   OpenAI-совместимый `/v1`).
 
@@ -38,7 +39,29 @@ AI-ревью PR: diff + RAG → баги/архитектура/рекомен�
 | 1. RAG по README/`docs`/коду + MCP git + `/help` | **Готово**, закоммичено (`e8c8308`) | `docs/REPORT_task6_traceability.md`, README |
 | 2. AI-ревью PR (diff + RAG → 3 раздела, GitHub Action, `/review`) | **Готово**: код и документация на GitHub; workflow — локальный коммит над `origin/master`, ждёт `workflow`-scope PAT | `docs/REPORT_task7_traceability.md`, `docs/VERIFY_task2.md` |
 | 3. Мини-сервис поддержки (FAQ + тикеты + CRM/MCP) | **Готово**: код, данные, тесты (106 OK), документация и `/support` в чате | `docs/REPORT_task8_traceability.md`, `docs/VERIFY_task3.md` |
-| 4. Ассистент по файлам проекта (чтение/поиск/изменение) | **Не начато** | `docs/Final_task.md`, задача 4 |
+| 4. Ассистент по файлам проекта (чтение/поиск/изменение) | **Готово**: `file_tasks`, MCP `files`, CLI, `/files`, тесты (170 OK), документация | `docs/REPORT_task9_traceability.md`, `docs/VERIFY_task4.md` |
+
+### Автовыбор MCP-сервера (18.10.2026)
+
+- При включённом MCP режим **`auto`** используется по умолчанию
+  (`config.MCP_AUTO_ID`, `MCP_SERVER_DEFAULT`): модель получает инструменты
+  всех серверов и сама выбирает сервер+инструмент по смыслу запроса.
+- Правила: git/ветка/коммиты/diff → `project`; содержимое/поиск/изменение
+  файлов → `files`; тикет/пользователь/поддержка → `support`.
+- `Agent.answer_via_mcp_auto()` вызывает выбранный сервер; при неверном или
+  неоднозначном выборе инструмента исправляет сервер по уникальному имени
+  (`list_files` без сервера → `files`).
+- Результат файловых инструментов (`read_file`, `read_many_files`,
+  `search_files`, `list_files`, `file_info`) не выводится сырым JSON: модель
+  формирует краткий ответ в Markdown, а HTML-карточка рендерит его как
+  форматированный текст.
+- Обычные chat-запросы на изменение («добавь серый фон…», «измени MODEL…»)
+  перехватываются до MCP и идут в `run_edit_file`: ассистент сам выбирает файл
+  по терминам инструкции, показывает diff и применяет запись (если не просили
+  «покажи diff»/«не записывай»).
+- В UI «Авто» — первый пункт списка; конкретный сервер можно закрепить.
+  Старые `session/mcp.json` без поля `routing` переводятся в `auto`.
+- Тест: `python -m tests.check_mcp_auto` (51 OK).
 
 ### Задача 1 — что уже работает
 
@@ -106,7 +129,7 @@ AI-ревью PR: diff + RAG → баги/архитектура/рекомен�
     `HEAD~1..HEAD`, RAG включён;
   - `_review_payload` — репозиторий = `docs_dir`, модель = выбранная /
     персона / запущенная локальная; при отсутствии модели — понятная ошибка;
-  - команда не перехватывается MCP, «Доской» и композицией (`via_mcp=False`);
+  - команда не перехватывается MCP (`via_mcp=False`);
   - клиент `js/app.js` пропускает `/review` без выбранной модели (как `/help`),
     чтобы сервер вернул осмысленный ответ/ошибку;
   - результат — Markdown-карточка в чате + список изменённых файлов.
@@ -141,6 +164,23 @@ AI-ревью PR: diff + RAG → баги/архитектура/рекомен�
   MCP-инструменты, индексатор, изоляция RAG, `/support`, fallback, агент,
   HTTP-обработчик).
 
+### Задача 4 — что уже работает
+
+- `rtk_app/file_tasks.py`: sandbox по `realpath`, чтение с кодировками,
+  поиск literal/regex по нескольким файлам, JSON-план модели, unified diff,
+  preview/apply, сценарии `find`, `docs`, `new`.
+- `files_server.py` (MCP, id `files`): `ping`, `list_files`, `read_file`,
+  `read_many_files`, `search_files`, `file_info`, `preview_file_change`,
+  `apply_file_change(confirm=True)`.
+- `files_cli.py`: `find`, `docs`, `new`; по умолчанию preview, запись `--apply`.
+- `web/server.py`: `parse_files`, `_files_payload`, ветка `is_files`; корень —
+  `docs_dir` (fallback `BASE_DIR`); `/files` не перехватывается MCP.
+- `js/app.js`: `/files` без обязательной модели для поиска; ошибки — карточкой.
+- Переиспользованы `pr_review.collect_changes`/`rag_context`/`_default_caller`,
+  `RagStore`, `project_server`, `mcp_client`, `html_report`.
+- Тесты `tests/check_files.py`: **170 OK, 0 FAIL** (sandbox, поиск, plan/apply,
+  docs, new, MCP, `/files`, HTTP, smoke на `G:\9potok\test1310`).
+
 ---
 
 ## 3. Git-состояние
@@ -162,6 +202,10 @@ r1210   https://github.com/kykich/1210.git
 `docs/support/`, `tests/check_support.py`, `docs/REPORT_task8_traceability.md`,
 `docs/VERIFY_task3.md`, а также правки `web/server.py`, `js/app.js`,
 `rtk_app/agent.py`, `rtk_app/config.py`, `README.md` и этого handoff.
+Изменения задачи 4 также **не закоммичены**: `rtk_app/file_tasks.py`,
+`files_server.py`, `files_cli.py`, `tests/check_files.py`,
+`docs/REPORT_task9_traceability.md`, `docs/VERIFY_task4.md` и правки
+`rtk_app/config.py`, `web/server.py`, `js/app.js`, `README.md`.
 
 Workflow-коммит (`.github/workflows/ai-review.yml`) **локальный**:
 HTTPS-токен без scope `workflow` не даёт GitHub создать workflow-файл.
@@ -237,7 +281,7 @@ python rtk_web.py 8123
 python -m tests.check_pr_review     # 86 OK, 0 FAIL
 python -m tests.check_project_help  # 79 OK, 0 FAIL
 python -m tests.check_support       # 106 OK, 0 FAIL
-python -m tests.check_composition   # 63 OK, 0 FAIL
+python -m tests.check_files         # 170 OK, 0 FAIL
 python -m tests.check_server_context #  7 OK, 0 FAIL
 node --check js\app.js
 ```
@@ -255,6 +299,9 @@ node --check js\app.js
 /support T-1001 Почему не работает авторизация?
 /support user=anna@example.com какие мои обращения?
 /support Как сбросить пароль?
+/files найди все места, где используется RAG_MIN_SCORE
+/files обнови документацию по изменениям HEAD~1..HEAD
+/files создай ADR про выбор SQLite для RAG --apply
 ```
 
 Модель: выбранная в селекторе → модель персоны → запущенная локальная.
@@ -263,7 +310,9 @@ node --check js\app.js
 `/review origin/master`, когда `origin/master == HEAD`), вернётся ошибка
 «Нет изменений между …» с названием общего коммита — модель не вызывается.
 `/support` требует модель; контекст тикета/пользователя и FAQ подставляются
-автоматически (MCP `support`, fallback — JSON).
+автоматически (MCP `support`, fallback — JSON). `/files find` работает без
+модели; `/files docs|new` требуют модель, по умолчанию показывают diff, запись —
+`--apply` (MCP `files`).
 
 ### CLI
 
@@ -278,6 +327,13 @@ python review_pr.py --repo G:\9potok\test1310\1210 `
 # локальная модель (URL можно не указывать — берётся из session/local_model.json)
 python review_pr.py --repo G:\9potok\test1310\1210 `
   --base HEAD~1 --head HEAD --no-rag --model Local --out review_local.md
+
+# работа с файлами (задача 4): поиск, docs, новый файл
+python files_cli.py find RAG_MIN_SCORE --root G:\9potok\test1310 --ext .py
+python files_cli.py docs --root G:\9potok\test1310\versions\1210 `
+  --base HEAD~1 --head HEAD --model DeepSeek-flash --no-rag
+python files_cli.py new adr "Выбор SQLite для RAG" `
+  --root G:\9potok\test1310\versions\1210 --model DeepSeek-flash --no-rag --apply
 ```
 
 ### GitHub Action
@@ -298,7 +354,6 @@ python review_pr.py --repo G:\9potok\test1310\1210 `
 |---|---|
 | `tests.check_pr_review` | **86 OK, 0 FAIL** (включая §2b пустой diff, §7 reasoning и §9 `/review`) |
 | `tests.check_project_help` | **79 OK, 0 FAIL** (включая linked worktree) |
-| `tests.check_composition` | **63 OK, 0 FAIL** |
 | `tests.check_server_context` | **7 OK, 0 FAIL** |
 | `node --check js/app.js` | OK |
 | `/review --no-rag` в реальном HTTP-чате на `test1310\1210` + DeepSeek-flash | `ok=true`, `review=true`, файлов 3, `html_len=4025`, все три раздела |
@@ -373,9 +428,8 @@ python review_pr.py --repo G:\9potok\test1310\1210 `
    сравнение — `/review v1009 v1210` (см. `docs/VERIFY_versions.md`).
 4. **Почистить секреты** в `1210/docs/session-handoff.md`, при необходимости
    пересобрать индекс.
-5. **Задача 4** (работа с файлами): MCP/tooling на чтение/поиск/изменение,
-   минимум 2 сценария (например, «найти использования API» и «обновить
-   документацию»), воспроизводимость.
+5. Задача 4 (опционально): удаление/переименование файлов, patch-формат
+   изменений, интерактивное подтверждение apply в UI.
 6. Задача 3 (опционально): запись/обновление тикетов через MCP, подключение
    реальной CRM вместо JSON, переиндексация FAQ из UI.
 7. Опционально: асинхронное ревью в чате, обновление существующего
@@ -398,7 +452,7 @@ python rtk_web.py 8123
 # тесты
 python -m tests.check_pr_review
 python -m tests.check_project_help
-python -m tests.check_composition
+python -m tests.check_files
 python -m tests.check_server_context
 node --check js\app.js
 
@@ -418,14 +472,16 @@ Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'rtk_web\.p
 - `docs/REPORT_task6_traceability.md` — задача 1: RAG/`/help`/MCP, результаты.
 - `docs/REPORT_task7_traceability.md` — задача 2: требования → код → тесты.
 - `docs/REPORT_task8_traceability.md` — задача 3: поддержка, тикеты, MCP, FAQ.
+- `docs/REPORT_task9_traceability.md` — задача 4: файлы, MCP, три сценария.
 - `docs/VERIFY_task2.md` — как проверить задачу 2 (тесты, CLI, RAG, Local, CI,
   чат).
 - `docs/VERIFY_task3.md` — как проверить задачу 3 (тикеты, MCP, FAQ/RAG,
   `/support`).
+- `docs/VERIFY_task4.md` — как проверить задачу 4 (sandbox, docs/new, MCP, `/files`).
 - `docs/VERIFY_versions.md` — тестовый стенд из 4 версий: ветки, worktree,
   проверка RAG/`/help`/`/review`.
 - `README.md` — пользовательская документация: RAG, `/help`, AI-ревью,
-  `/review`, `/support`, структура проекта.
+  `/review`, `/support`, `/files`, структура проекта.
 - `docs/OPTIMIZATION_REVIEW.md` — замечания по архитектуре (не все внедрены).
 
 ---
