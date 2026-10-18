@@ -81,10 +81,10 @@ body { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); overflow:
     border-radius: 6px;
     border: none;
     resize: vertical;
-    background: #343c52;
-    color: #fff;
+    background: #c8e6c9;
+    color: #1e3a24;
 }
-.qbox::placeholder { color: #9aa2bd; }
+.qbox::placeholder { color: #4f6b55; }
 .qbox:focus { outline: 2px solid var(--accent); }
 
 .btn-side {
@@ -1694,6 +1694,8 @@ body { font-family: 'Segoe UI', Arial, sans-serif; color: var(--text); overflow:
     border-radius: 6px;
     padding: 8px 10px;
 }
+.msg.a .mcp-answer-formatted > :first-child { margin-top: 0; }
+.msg.a .mcp-answer-formatted > :last-child { margin-bottom: 0; }
 .msg.a .mcp-answer-error { border-color: #e2b7b3; }
 .msg.a .mcp-answer-error .mcp-answer-head {
     background: rgba(179, 38, 30, 0.08);
